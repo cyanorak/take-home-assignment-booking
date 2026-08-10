@@ -107,7 +107,7 @@ obviously worth doing.
 | # | Item | Note |
 |---|---|---|
 | N1 | **Refund** when charged-but-not-booked | The assignment's own top nice-to-have. Core is the explicit terminal state (A4); this is the remedy on top |
-| N2 | Webhook/hook resume for a `pending` charge | Only if A17 lands on "resolve it" |
+| N2 | Webhook/hook resume for a `pending` charge | A17 chose the cheap answer (a named terminal state); this resolves it. Strongest case of the five — `payment_pending` also strands a hold (§10.4) |
 | N3 | Provider-side state in the timeline, reconciled against ours | Cheap and high review value, but pure addition |
 | N4 | L3 — losing-run convergence via `hook.getConflict()` | Defence-in-depth behind a working L1; the reasoning is the deliverable, the code is optional |
 | N5 | Test: L1 disabled, prove L2 holds independently | Best evidence that the layering is real, but it proves a design property rather than a requirement |
@@ -1041,16 +1041,19 @@ lines to find bookings that took money and delivered nothing.
 ### 10.3 Transitions
 
 ```
-pending ──hold ok──> held ──charge ok──> charged ──consume ok──> confirmed
-   │                  │                     │
-   │ hold fails       │ charge fails        │ consume fails
-   │ (permanent)      │ (permanent)         │ (permanent)
-   ▼                  ▼  [release hold]     ▼
-inventory_          payment_failed      charged_not_booked
-unavailable
-                    charge -> 'pending'
-                            ▼
-                     payment_pending
+            ┌── hold fails ─────────> inventory_unavailable        409
+            │
+pending ────┤
+            │            ┌── charge fails ───> payment_failed      402  [hold released]
+            │            │
+            └─> held ────┼── charge pending ─> payment_pending  ⚠️ 409  [hold KEPT]
+                         │
+                         └── charge ok ─> charged ──┬── consume ok ──> confirmed  201
+                                                    │
+                                                    └── consume fails ─────────────>
+                                                            charged_not_booked ⚠️ 409
+
+⚠️ = requiresIntervention: true          "fails" = permanently, after retries
 ```
 
 Legal transitions, and nothing else:
@@ -1096,6 +1099,13 @@ not mistaken for a resting state. If N2 (webhook resume) is ever built it become
 non-terminal, with `payment_pending → charged | payment_failed`. That is the only transition
 the design would need to grow.
 
+**`payment_pending` deliberately does *not* release the hold**, unlike `payment_failed`.
+The charge may still settle, and releasing inventory we may be about to owe the customer
+would turn an uncertain state into a definitely-broken one. So a `payment_pending` booking
+holds inventory until the provider expires it — which is a second reason it carries
+`requiresIntervention: true`, and the sharpest argument for N2 if there is ever budget.
+This asymmetry with `payment_failed` is intentional and belongs in the README.
+
 It returns `409`, not `202`, even though "we don't know yet" sounds like `202`. `202` would
 promise progress that never comes: we have stopped, and a human must pick it up. An honest
 `409` plus `requiresIntervention: true` says so. (Under A1 there is no `202` in this API at
@@ -1123,9 +1133,9 @@ retry would otherwise duplicate a real-world side effect.**
 | | Where | Why |
 |---|---|---|
 | Validation, fingerprinting, L1 claim, `bookingId` allocation | **Before the workflow**, in the request handler | They must happen before `start()`, and their results become workflow arguments. Also they can reject without creating a run |
-| Choosing the next state, deciding whether to release | **Workflow body** | Pure decisions. Must stay deterministic — no clocks, no randomness, no I/O |
+| Choosing *which* step runs next, and whether to release | **Workflow body** | Pure control flow over step results. Must stay deterministic — no clocks, no randomness, no I/O |
 | `hold`, `charge`, `consume`, `release` | **One step each** | Each is exactly one real-world side effect |
-| Persisting booking state transitions | **Inside the step that caused them** | Keeps intent/outcome adjacent to the call that produced it (`CORRECTNESS.md` §4.4) |
+| Persisting the resulting booking state | **Inside the step that caused it** | The workflow body cannot do I/O, and this keeps the state write adjacent to the call that justified it (`CORRECTNESS.md` §4.4) |
 
 **One provider call per step, never two.** Two side effects in one step means a retry after
 a partial failure re-runs the first — the exact bug this exercise is built around.
@@ -1137,10 +1147,20 @@ world?"*, because that is the question being graded.
 
 | Step | Signature | Retry does what, in the world | `maxRetries` | Fatal when |
 |---|---|---|---|---|
-| `holdStep` | `(offerId, idemKey) → Hold` | Returns the **same** hold — the key makes it a read-repair | 3 | Offer unknown / sold out |
-| `chargeStep` | `(amountCents, currency, idemKey) → Charge` | Returns the **same** charge. This is the one that must never duplicate | 3 | Card declined |
-| `consumeStep` | `(holdId) → void` | No-op; the hold is already `consumed` (A16 — resource identity) | 5 | Hold expired or released |
-| `releaseStep` | `(holdId) → void` | No-op; the hold is already `released` | 2 | Hold already `consumed` |
+| `holdStep` | `(bookingId, offerId, idemKey) → Hold` | Returns the **same** hold — the key makes it a read-repair | 3 | Offer unknown / sold out |
+| `chargeStep` | `(bookingId, amountCents, currency, idemKey) → Charge` | Returns the **same** charge. This is the one that must never duplicate | 3 | Card declined |
+| `consumeStep` | `(bookingId, holdId) → void` | No-op; the hold is already `consumed` (A16 — resource identity) | 5 | Hold expired |
+| `releaseStep` | `(bookingId, holdId) → void` | No-op; the hold is already `released` | 2 | Hold already `consumed` |
+
+**Why every step takes `bookingId`.** The step is what persists the resulting state
+transition, so it needs to know which booking. An earlier draft had pure provider wrappers
+without it, which contradicted §11.1 — the workflow body cannot write state (it must stay
+deterministic and I/O-free), so the step must.
+
+Writing booking state inside the step does **not** violate "one side effect per step". A
+`Map` write is local, not a real-world effect, and it is idempotent by construction —
+setting `state = 'held'` twice is indistinguishable from once. Only the provider call is a
+real side effect, and there is still exactly one per step.
 
 Notes on the numbers, which are judgement rather than convention:
 

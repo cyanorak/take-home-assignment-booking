@@ -476,9 +476,9 @@ The sequence every failure in §6 is a deviation from. States are `PLAN.md` §10
 |---|---|---|---|
 | 1 | Handler | Validate body and `Idempotency-Key`. Reject before claiming (§11.4) | — |
 | 2 | Handler | Compute request fingerprint over the canonicalised body | I5 |
-| 3 | Handler | **`claim(key, fingerprint)`** — one synchronous turn, no `await` inside | **I4** |
-| 4 | Handler | Allocate `bookingId`; write booking `pending`; record → `running(runId)` | L2 needs a stable id before any provider call |
-| 5 | Handler | `start(bookingWorkflow, [bookingId, offerId, amountCents, currency, chaos])` | A18 — everything a step needs is an argument |
+| 3 | Handler | **`claim(key, fingerprint)`**, then set `record.inflight` — both in one synchronous turn, no `await` between | **I4** |
+| 4 | Handler | Allocate `bookingId`; write booking `pending` | L2 needs a stable id before any provider call |
+| 5 | Handler | `start(bookingWorkflow, [bookingId, offerId, amountCents, currency, chaos])`, **then** record → `running(runId)` | A18 — everything a step needs is an argument. `runId` does not exist until `start()` resolves |
 | 6 | Workflow | `holdStep(offerId, "bkg:{id}:hold")` → `Hold` | I2, I6 |
 | 7 | Workflow | `pending → held` | — |
 | 8 | Workflow | `chargeStep(amountCents, currency, "bkg:{id}:charge")` → `Charge{succeeded}` | I1, I6 |
@@ -490,8 +490,11 @@ The sequence every failure in §6 is a deviation from. States are `PLAN.md` §10
 
 Three things about this sequence are load-bearing rather than incidental:
 
-- **Steps 3–5 happen before any workflow exists.** The claim, the id, and the fingerprint
-  are all preconditions for the run, not products of it.
+- **Steps 3–4 happen before any workflow exists.** The claim, the id, and the fingerprint
+  are preconditions for the run, not products of it. `runId` is the one field that is a
+  product, which is why it is written after `start()` and why nothing may depend on it
+  being present — a duplicate arriving in that window awaits `record.inflight` instead
+  (§3/L1).
 - **Step 4 precedes step 6** because L2's keys derive from `bookingId`. Allocating the id
   inside the workflow would make the keys depend on execution identity — the mistake §3/L2
   exists to prevent.
@@ -542,6 +545,7 @@ our knowledge of it disagree, and it is what L2 exists for.
 | A provider hangs | **The request hangs.** No deadline (A1) — accepted, documented limitation |
 | Release fails after payment failure | `payment_failed` + `holdReleased: false` (§10.4) |
 | Unknown `bookingId` on timeline | `404`, typed |
+| **Workflow rejects unexpectedly** (a bug, not a modelled failure) | `500` with a generic error. The record keeps the settled-rejected `inflight`, so a retry with the same key gets the **same** `500` rather than re-running — correct, since we do not know what the failed run did. The booking rests non-terminal and the timeline still shows every step that ran. This is the **only** `500` in the API |
 | Process restart mid-run | Run does not resume (§4.5). Booking is stranded non-terminal — a **known, documented gap** |
 
 ### 6.4 What is deliberately *not* in this taxonomy
