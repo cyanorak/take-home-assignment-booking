@@ -5,8 +5,8 @@
  * observable — which is exactly what makes "exactly one charge" assertable
  * here rather than inferred through the runtime.
  */
-import { describe, it, expect } from "vitest";
-import { parseChaosHeader } from "../src/providers/chaos.js";
+import { describe, it, expect, afterEach } from "vitest";
+import { chaosAllowed, parseChaosHeader } from "../src/providers/chaos.js";
 import { paymentProvider, countCharges, inspectCharge } from "../src/providers/payment.js";
 import { inventoryProvider, inspectHold } from "../src/providers/inventory.js";
 
@@ -38,6 +38,39 @@ describe("parseChaosHeader", () => {
   it("treats a missing header as no chaos", () => {
     expect(parseChaosHeader(undefined)).toEqual({});
     expect(parseChaosHeader("")).toEqual({});
+  });
+
+  it("ignores the header entirely when chaos is not allowed", () => {
+    // A caller must not be able to force failure modes in production: two of
+    // them are not self-harm. `pending` sets requiresIntervention, so anyone
+    // could page the on-call at will; repeated `timeout` amplifies one request
+    // into several provider calls.
+    expect(parseChaosHeader("charge=pending", false)).toEqual({});
+    expect(parseChaosHeader("hold=timeout,timeout,timeout", false)).toEqual({});
+  });
+});
+
+describe("chaosAllowed", () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    process.env["NODE_ENV"] = original["NODE_ENV"];
+    delete process.env["ALLOW_CHAOS"];
+  });
+
+  it("is off in production by default — a deployment inherits the safe default", () => {
+    process.env["NODE_ENV"] = "production";
+    expect(chaosAllowed()).toBe(false);
+  });
+
+  it("is on outside production, so the reviewer's demo works", () => {
+    process.env["NODE_ENV"] = "development";
+    expect(chaosAllowed()).toBe(true);
+  });
+
+  it("can be re-enabled explicitly for a demo deployment", () => {
+    process.env["NODE_ENV"] = "production";
+    process.env["ALLOW_CHAOS"] = "true";
+    expect(chaosAllowed()).toBe(true);
   });
 });
 

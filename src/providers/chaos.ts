@@ -49,6 +49,31 @@ const METHODS: readonly ProviderMethod[] = ["hold", "charge", "consume", "releas
 export type ChaosScript = Partial<Record<ProviderMethod, Outcome[]>>;
 
 /**
+ * Is caller-driven failure injection allowed in this environment?
+ *
+ * `X-Chaos` is a debugging and demo affordance, but it is caller-controlled and
+ * two of its outcomes are not merely self-harm:
+ *
+ *   - `charge=pending` produces a booking with requiresIntervention: true, so
+ *     any caller could manufacture pages for the on-call engineer at will.
+ *   - `hold=timeout,timeout,timeout` turns one request into four provider
+ *     calls, against a real provider's rate limit and bill.
+ *
+ * The assignment assumes a single trusted upstream caller, which is what makes
+ * the header acceptable here. That assumption is stated rather than relied on
+ * silently: chaos is **off in production** unless explicitly re-enabled, so a
+ * deployment inherits the safe default without anyone having to remember.
+ *
+ * (In a real deployment the mocks would be replaced by Stripe and Amadeus, and
+ * the `script` argument would have nowhere to go — so this is defence in depth
+ * rather than the only thing standing between a caller and the failure modes.)
+ */
+export function chaosAllowed(): boolean {
+  if (process.env.ALLOW_CHAOS === "true") return true; // opt-in for a demo deploy
+  return process.env.NODE_ENV !== "production";
+}
+
+/**
  * Parses `X-Chaos: charge=applied_then_lost,ok;hold=http_5xx`.
  *
  * `;` separates methods, `=` separates a method from its outcome list, `,`
@@ -56,9 +81,15 @@ export type ChaosScript = Partial<Record<ProviderMethod, Outcome[]>>;
  * rather than rejected: this is a test and demo affordance, and failing a
  * booking because a debugging header was malformed would be worse than
  * ignoring it.
+ *
+ * Returns an empty script — i.e. everything succeeds — when chaos is not
+ * allowed in this environment.
  */
-export function parseChaosHeader(header: string | undefined): ChaosScript {
-  if (!header) return {};
+export function parseChaosHeader(
+  header: string | undefined,
+  allowed: boolean = chaosAllowed(),
+): ChaosScript {
+  if (!header || !allowed) return {};
   const script: ChaosScript = {};
 
   for (const clause of header.split(";")) {

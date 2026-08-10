@@ -61,7 +61,16 @@ bookingsRouter.post("/bookings", async (c) => {
   // Failure-mode config travels as a workflow argument, never as ambient
   // request state — steps run in a separate module instance and would never
   // see it otherwise (PLAN.md A18, verified in V1).
+  //
+  // Off in production unless ALLOW_CHAOS=true. See providers/chaos.ts.
   const script = parseChaosHeader(c.req.header("X-Chaos"));
+
+  // Echo what was actually applied. Malformed clauses are ignored rather than
+  // rejected, and chaos is gated by environment — without this, "my header did
+  // nothing" is indistinguishable from "my header was wrong".
+  if (c.req.header("X-Chaos")) {
+    c.header("X-Chaos-Applied", JSON.stringify(script));
+  }
 
   const request = validated.value;
   const claimed = claim<BookingResult>(idempotencyKey, fingerprint(request));

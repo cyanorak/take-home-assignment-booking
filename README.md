@@ -120,6 +120,26 @@ The script reaches the provider as a **workflow argument**, never as ambient req
 steps cannot see anything the HTTP handler set, so a header read ambiently inside a step
 would silently do nothing.
 
+### Is `X-Chaos` safe to deploy?
+
+**It is off in production by default** (`NODE_ENV === "production"`), and can be turned back
+on for a demo deployment with `ALLOW_CHAOS=true`.
+
+The header is caller-controlled, and two outcomes are not merely self-harm:
+`charge=pending` produces a booking with `requiresIntervention: true`, so any caller could
+manufacture pages for the on-call engineer; and `hold=timeout,timeout,timeout` amplifies one
+request into several provider calls, against a real provider's rate limit and bill.
+
+The assignment assumes a single trusted upstream caller, which is what makes the header
+acceptable here — but that is an assumption worth stating rather than relying on silently,
+so the safe default is inherited rather than remembered. (In a real deployment the mocks
+would be Stripe and Amadeus, and the failure-mode argument would have nowhere to go, so this
+is defence in depth rather than the only control.)
+
+Responses echo `X-Chaos-Applied` with the script that was actually parsed. Malformed clauses
+are ignored rather than rejected, so without the echo "my header did nothing" would be
+indistinguishable from "my header was wrong".
+
 ## Design documents
 
 The reasoning behind this service lives in two documents written before implementation
