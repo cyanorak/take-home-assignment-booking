@@ -1,2 +1,31 @@
+# Assignment brief — not ours to publish
 ASSIGNMENT.md
+
+# Scratch
 notes
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# WDK Local World state (ephemeral by design — see PLAN.md D1.1/C3)
+.workflow-data/
+
+# Test / tooling output
+coverage/
+.vitest/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+/.swc

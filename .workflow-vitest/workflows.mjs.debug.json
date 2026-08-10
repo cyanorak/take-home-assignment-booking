@@ -1,0 +1,8 @@
+{
+  "workflowFiles": [
+    "/home/user/src/take-home-assignment-booking/src/probe.ts"
+  ],
+  "serdeOnlyFiles": [
+    "/home/user/src/take-home-assignment-booking/node_modules/@workflow/builders/dist/serde-checker.js"
+  ]
+}

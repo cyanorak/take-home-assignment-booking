@@ -1,0 +1,33 @@
+{
+  "name": "booking-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "nitro dev",
+    "build": "nitro build",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "typecheck": "tsc --noEmit",
+    "workflow:inspect": "workflow inspect runs",
+    "workflow:web": "workflow web"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "hono": "^4.7.0",
+    "nitro": "^3.0.260610-beta",
+    "rollup": "^4.62.4",
+    "workflow": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@workflow/vitest": "^4.0.17",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
