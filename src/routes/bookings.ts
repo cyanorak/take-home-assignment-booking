@@ -21,6 +21,7 @@ import { bookingWorkflow } from "../workflows/booking.js";
 import { fingerprint, validateBookingRequest } from "../domain/request.js";
 import { applyOutcome, attachRun, createBooking } from "../store/bookings.js";
 import { claim, settle, type IdempotencyRecord } from "../store/idempotency.js";
+import { parseChaosHeader, type ChaosScript } from "../providers/chaos.js";
 import {
   requiresIntervention,
   type BookingOutcome,
@@ -57,6 +58,11 @@ bookingsRouter.post("/bookings", async (c) => {
   const validated = validateBookingRequest(body);
   if (!validated.ok) return c.json({ error: validated.error }, 400);
 
+  // Failure-mode config travels as a workflow argument, never as ambient
+  // request state — steps run in a separate module instance and would never
+  // see it otherwise (PLAN.md A18, verified in V1).
+  const script = parseChaosHeader(c.req.header("X-Chaos"));
+
   const request = validated.value;
   const claimed = claim<BookingResult>(idempotencyKey, fingerprint(request));
 
@@ -79,7 +85,7 @@ bookingsRouter.post("/bookings", async (c) => {
     // Assign the promise in the SAME synchronous turn as the claim: calling an
     // async function returns its promise immediately, so a concurrent duplicate
     // is guaranteed to find something to await rather than an empty record.
-    const inflight = runBooking(idempotencyKey, request, claimed.record);
+    const inflight = runBooking(idempotencyKey, request, claimed.record, script);
     claimed.record.inflight = inflight;
     const result = await inflight;
     return c.json(result.body, result.status);
@@ -95,6 +101,7 @@ async function runBooking(
   idempotencyKey: string,
   request: BookingRequest,
   record: IdempotencyRecord<BookingResult>,
+  script: ChaosScript,
 ): Promise<BookingResult> {
   const booking = createBooking({
     ...request,
@@ -110,6 +117,7 @@ async function runBooking(
     request.offerId,
     request.amountCents,
     request.currency,
+    script,
   ]);
   record.runId = run.runId;
   attachRun(booking.id, run.runId);

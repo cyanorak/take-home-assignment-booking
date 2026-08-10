@@ -19,10 +19,21 @@ export type Charge = {
   idempotencyKey: string;
 };
 
+/**
+ * The interfaces as given in the assignment, plus one mock-only extension: a
+ * trailing `script` argument that configures failure modes (PLAN.md A9). It is
+ * optional and last, so the given contract still type-checks unchanged. A real
+ * provider would not have it — the failure modes would be the world's.
+ *
+ * Note what is NOT extended: `release`, `consume`, and `refund` still take no
+ * idempotency key. That asymmetry is principled, not an oversight — keyed calls
+ * CREATE a resource, unkeyed calls TRANSITION a named one, and the resource id
+ * is already the key. See PLAN.md A16.
+ */
 export interface InventoryProvider {
-  hold(offerId: string, idempotencyKey: string): Promise<Hold>;
-  release(holdId: string): Promise<void>;
-  consume(holdId: string): Promise<void>;
+  hold(offerId: string, idempotencyKey: string, script?: MockScript): Promise<Hold>;
+  release(holdId: string, script?: MockScript): Promise<void>;
+  consume(holdId: string, script?: MockScript): Promise<void>;
 }
 
 export interface PaymentProvider {
@@ -30,9 +41,13 @@ export interface PaymentProvider {
     amountCents: number,
     currency: string,
     idempotencyKey: string,
+    script?: MockScript,
   ): Promise<Charge>;
-  refund(chargeId: string): Promise<void>;
+  refund(chargeId: string, script?: MockScript): Promise<void>;
 }
+
+/** Ordered failure outcomes for a single provider method. See providers/chaos.ts. */
+export type MockScript = readonly string[];
 
 /**
  * Booking states — PLAN.md §10.2. Every quadrant of the (charged | not) x

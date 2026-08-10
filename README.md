@@ -4,8 +4,8 @@ A small booking service that holds inventory through one mock provider, charges 
 another, and returns a typed response — built on a durable workflow runtime, with an audit
 timeline that explains what happened to any booking.
 
-> **Status: in progress.** The happy path works end to end (V1). Idempotency, failure
-> modes, the full state machine, and the timeline are not built yet — see
+> **Status: in progress.** The happy path, idempotency, and the provider failure modes work
+> (V1–V3). The full state machine and the timeline are not built yet — see
 > [Build progress](#build-progress) for exactly what does and does not work.
 
 ## Quick start
@@ -59,6 +59,67 @@ npm run dev            # terminal 1
 ./scripts/smoke.sh     # terminal 2
 ```
 
+## Driving the failure modes — the `X-Chaos` header
+
+Both providers fail on demand, configured by **one mechanism**: an ordered list of outcomes
+per provider method. The Nth call to a method gets the Nth outcome, and once the list runs
+out everything succeeds. Fully deterministic — no randomness, no timing, no sleeps.
+
+```
+X-Chaos: charge=http_5xx,ok        # fail once, then succeed
+X-Chaos: hold=applied_then_lost    # commit, then lose the response
+X-Chaos: charge=permanent          # declined — not retried
+X-Chaos: hold=timeout;charge=http_5xx,ok    # ';' separates methods
+```
+
+| Outcome | What the provider does |
+|---|---|
+| `ok` | Succeeds |
+| `http_5xx` | Throws. **Nothing committed** — safe to retry |
+| `timeout` | Throws. Nothing committed |
+| `applied_then_lost` | **Commits, then throws.** The caller cannot tell this from "never happened" |
+| `permanent` | Throws. Sold out / card declined — retrying changes nothing |
+| `pending` | Charge only: returns `status: "pending"` |
+
+`applied_then_lost` is the one that matters. It is the failure that idempotency keys exist
+for, and it is why the providers read-repair on the key *before* consulting the script:
+
+```bash
+curl -X POST http://localhost:3000/bookings \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-lost' \
+  -H 'X-Chaos: charge=applied_then_lost' \
+  -d '{"offerId":"offer-abc","amountCents":12500,"currency":"GBP"}'
+# -> 201 confirmed. The charge was created on attempt 1, the response was lost,
+#    and attempt 2 returned that same charge rather than making a second one.
+```
+
+Inspect what actually happened:
+
+```bash
+npx workflow inspect runs          # find the run
+npx workflow inspect run <run-id>  # per-step attempts, inputs, outputs
+```
+
+### How the tests use it
+
+Two layers, deliberately:
+
+- **Unit tests** (`tests/chaos.test.ts`) call the providers directly, with no workflow
+  runtime. Provider state is observable from the test process here, so this is where
+  "exactly one charge exists" is asserted *directly* — `countCharges()` before and after.
+- **Integration tests** (`tests/failure-modes.integration.test.ts`) drive the header through
+  a real booking. Provider state is *not* readable from the test process (steps run in a
+  separate module instance), so these assert through the runtime's own step log: how many
+  attempts ran, and which idempotency key the persisted input carries.
+
+Neither layer alone would be convincing. Together they say: the key never varies across
+attempts, and a provider given the same key twice charges once.
+
+The script reaches the provider as a **workflow argument**, never as ambient request state —
+steps cannot see anything the HTTP handler set, so a header read ambiently inside a step
+would silently do nothing.
+
 ## Design documents
 
 The reasoning behind this service lives in two documents written before implementation
@@ -109,14 +170,14 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 |---|---|---|
 | V1 | Walking skeleton — happy path end to end | ✅ |
 | V2 | Idempotency — claim, replay, conflict, concurrency test | ✅ |
-| V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | — |
+| V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | ✅ |
 | V4 | State machine — all terminal states, the four quadrants | — |
 | V5 | Timeline endpoint | — |
 | V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
 
-**Not built yet.** Every provider call succeeds, so no failure state is reachable —
-`confirmed` is currently the only terminal state a caller can see. There is no timeline
-endpoint.
+**Not built yet.** The workflow does not yet catch a permanently-failed step, so a declined
+card currently surfaces as a `500` instead of `402 payment_failed`. `confirmed` is still the
+only terminal state a caller sees. There is no timeline endpoint. Both land in V4/V5.
 
 ### Does the concurrency test prove what it claims?
 
@@ -152,7 +213,10 @@ src/
   routes/bookings.ts    POST /bookings — validate, start, await, persist, respond
   workflows/booking.ts  the workflow and its steps, each annotated with what a
                         retry of it does in the world
-  providers/            mock InventoryProvider and PaymentProvider
+  providers/
+    inventory.ts        mock InventoryProvider
+    payment.ts          mock PaymentProvider
+    chaos.ts            failure-mode script + X-Chaos parsing
   domain/
     types.ts            provider contracts and the booking state machine
     keys.ts             L2 idempotency key derivation (frozen by unit test)

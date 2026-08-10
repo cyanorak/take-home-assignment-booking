@@ -13,6 +13,12 @@
  *     returning success; an illegal transition is a genuine error.
  */
 import type { Hold, InventoryProvider } from "../domain/types.js";
+import {
+  nextOutcome,
+  ProviderPermanentError,
+  ProviderTransientError,
+  type Outcome,
+} from "./chaos.js";
 
 const HOLD_TTL_MS = 15 * 60 * 1000;
 
@@ -34,11 +40,18 @@ export class IllegalHoldTransitionError extends Error {
 }
 
 export const inventoryProvider: InventoryProvider = {
-  async hold(offerId: string, idempotencyKey: string): Promise<Hold> {
-    // Read-repair: the same key always yields the same hold, so a retry after
-    // an unknown outcome returns the original rather than creating a second.
+  async hold(offerId: string, idempotencyKey: string, script?: Outcome[]): Promise<Hold> {
+    // Read-repair FIRST, before the script is consulted. The same key always
+    // yields the same hold, so a retry after an unknown outcome returns the
+    // original rather than creating a second — I2. This ordering is the entire
+    // reason `applied_then_lost` is survivable.
     const existingId = holdIdByKey.get(idempotencyKey);
     if (existingId) return { ...holdsById.get(existingId)! };
+
+    const outcome = nextOutcome(`hold:${idempotencyKey}`, script);
+    if (outcome === "http_5xx") throw new ProviderTransientError("inventory 503");
+    if (outcome === "timeout") throw new ProviderTransientError("inventory timeout");
+    if (outcome === "permanent") throw new ProviderPermanentError("offer sold out");
 
     const hold: Hold = {
       holdId: `hold_${crypto.randomUUID()}`,
@@ -48,27 +61,50 @@ export const inventoryProvider: InventoryProvider = {
     };
     holdsById.set(hold.holdId, hold);
     holdIdByKey.set(idempotencyKey, hold.holdId);
+
+    // Committed, then the response is lost. A retry hits the read-repair above.
+    if (outcome === "applied_then_lost") {
+      throw new ProviderTransientError("inventory response lost after commit");
+    }
     return { ...hold };
   },
 
-  async release(holdId: string): Promise<void> {
+  async release(holdId: string, script?: Outcome[]): Promise<void> {
     const hold = holdsById.get(holdId);
     if (!hold) throw new UnknownHoldError(holdId);
     if (hold.status === "released") return; // already done — no-op
     if (hold.status === "consumed") {
       throw new IllegalHoldTransitionError(holdId, "consumed", "released");
     }
+
+    const outcome = nextOutcome(`release:${holdId}`, script);
+    if (outcome === "http_5xx") throw new ProviderTransientError("inventory 503");
+    if (outcome === "timeout") throw new ProviderTransientError("inventory timeout");
+    if (outcome === "permanent") throw new ProviderPermanentError("hold cannot be released");
+
     hold.status = "released";
+    if (outcome === "applied_then_lost") {
+      throw new ProviderTransientError("inventory response lost after commit");
+    }
   },
 
-  async consume(holdId: string): Promise<void> {
+  async consume(holdId: string, script?: Outcome[]): Promise<void> {
     const hold = holdsById.get(holdId);
     if (!hold) throw new UnknownHoldError(holdId);
     if (hold.status === "consumed") return; // already done — no-op
     if (hold.status === "released") {
       throw new IllegalHoldTransitionError(holdId, "released", "consumed");
     }
+
+    const outcome = nextOutcome(`consume:${holdId}`, script);
+    if (outcome === "http_5xx") throw new ProviderTransientError("inventory 503");
+    if (outcome === "timeout") throw new ProviderTransientError("inventory timeout");
+    if (outcome === "permanent") throw new ProviderPermanentError("hold expired");
+
     hold.status = "consumed";
+    if (outcome === "applied_then_lost") {
+      throw new ProviderTransientError("inventory response lost after commit");
+    }
   },
 };
 
