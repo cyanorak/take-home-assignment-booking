@@ -68,23 +68,7 @@ export type BookingState =
   | "charged_not_booked"
   | "payment_pending";
 
-export const TERMINAL_STATES = [
-  "confirmed",
-  "inventory_unavailable",
-  "payment_failed",
-  "charged_not_booked",
-  "payment_pending",
-] as const satisfies readonly BookingState[];
-
-/** States where a human must act — PLAN.md §10.2.1. The alerting signal. */
-export const INTERVENTION_STATES = [
-  "charged_not_booked",
-  "payment_pending",
-] as const satisfies readonly BookingState[];
-
-export function requiresIntervention(state: BookingState): boolean {
-  return (INTERVENTION_STATES as readonly BookingState[]).includes(state);
-}
+/** The state machine itself — transitions, HTTP mapping — lives in ./state.ts. */
 
 /** What a booking workflow returns. The handler persists this. */
 export type BookingOutcome = {

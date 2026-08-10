@@ -39,17 +39,33 @@ const order = (offerId: string, amountCents = 12_500) => ({
 /**
  * Counts booking runs according to the runtime's own registry.
  *
- * Two things learned by inspecting the real API rather than assuming:
+ * Three things learned by inspecting the real API rather than assuming:
  *
  *  - `workflowName` is fully qualified — "workflow//./src/workflows/booking//
  *    bookingWorkflow". The CLI prettifies it; the API does not.
  *  - Run data survives across vitest invocations (it lives in .workflow-data/),
  *    so an absolute count is meaningless. Every assertion here is a delta.
+ *  - **`runs.list()` paginates.** A single call returns one page, so an
+ *    unpaginated count silently saturates once history exceeds a page — and
+ *    then every delta assertion reads zero. This suite passed for two verticals
+ *    before history grew past the page size and three tests failed at once.
+ *    Follow the cursor.
  */
 async function runCount(): Promise<number> {
   const world = await getWorld();
-  const runs = await world.runs.list({ resolveData: "none" });
-  return runs.data.filter((r) => r.workflowName.endsWith("bookingWorkflow")).length;
+  let count = 0;
+  let cursor: string | null | undefined;
+
+  do {
+    const page = await world.runs.list({
+      resolveData: "none",
+      ...(cursor ? { pagination: { cursor } } : {}),
+    });
+    count += page.data.filter((r) => r.workflowName.endsWith("bookingWorkflow")).length;
+    cursor = page.cursor;
+  } while (cursor);
+
+  return count;
 }
 
 describe("I5 — replay", () => {

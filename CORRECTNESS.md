@@ -398,6 +398,12 @@ within a file. Every test must therefore use **distinct idempotency keys and off
 derive them from the test name. This is closer to how a real provider behaves than a reset
 hook would be, and it avoids a test-only step whose only job is clearing state.
 
+**`runs.list()` paginates.** An unpaginated count silently saturates at one page, and every
+delta assertion then reads zero. This suite passed for two verticals before the accumulated
+history in `.workflow-data/` grew past a page and three tests failed at once — a failure
+mode that gets *more* likely the longer the project runs. Follow the cursor, and use
+`npm run clean` to reset the local history.
+
 **Expected suite speed, so nobody "optimises" it later.** Each workflow run costs roughly a
 second regardless of how trivial it is — the probe's 11 tests took 17s, and a 7-step
 workflow took ~2s against ~1s for a 1-step one. That floor is the runtime's queue dispatch,

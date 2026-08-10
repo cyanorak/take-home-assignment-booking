@@ -82,6 +82,31 @@ send "$RUN_ID-bad" "offer-$RUN_ID-bad" 0
 check "amountCents=0 returns 400" "400" "$STATUS"
 check "error code is invalid_amount" "invalid_amount" "$(jget "$BODY" error.code)"
 
+# --- the four-quadrant failure matrix ----------------------------------------
+# Nothing here may produce a 5xx: every one is an outcome we understand.
+chaos() { # name key chaos expected-status expected-state expected-intervention
+  local raw
+  raw=$(curl -s -w '\n%{http_code}' -X POST "$BASE/bookings" \
+    -H 'content-type: application/json' \
+    -H "Idempotency-Key: $RUN_ID-$2" -H "X-Chaos: $3" \
+    -d "{\"offerId\":\"offer-$RUN_ID-$2\",\"amountCents\":12500,\"currency\":\"GBP\"}")
+  local st bd
+  st=$(printf '%s' "$raw" | tail -n1)
+  bd=$(printf '%s' "$raw" | sed '$d')
+  check "$1 -> $4" "$4" "$st"
+  check "$1 state" "$5" "$(jget "$bd" state)"
+  check "$1 requiresIntervention" "$6" "$(jget "$bd" requiresIntervention)"
+}
+
+echo
+echo "  four-quadrant matrix:"
+chaos "hold fails"        "q1" "hold=permanent"    "409" "inventory_unavailable" "false"
+chaos "card declined"     "q2" "charge=permanent"  "402" "payment_failed"        "false"
+chaos "charged not booked" "q3" "consume=permanent" "409" "charged_not_booked"   "true"
+chaos "charge pending"    "q4" "charge=pending"    "409" "payment_pending"       "true"
+chaos "transient recovers" "q5" "charge=http_5xx,ok" "201" "confirmed"           "false"
+echo
+
 # --- concurrency over real HTTP ---------------------------------------------
 KEY="$RUN_ID-concurrent"
 OFFER="offer-$RUN_ID-concurrent"

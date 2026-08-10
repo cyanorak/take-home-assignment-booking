@@ -4,9 +4,9 @@ A small booking service that holds inventory through one mock provider, charges 
 another, and returns a typed response — built on a durable workflow runtime, with an audit
 timeline that explains what happened to any booking.
 
-> **Status: in progress.** The happy path, idempotency, and the provider failure modes work
-> (V1–V3). The full state machine and the timeline are not built yet — see
-> [Build progress](#build-progress) for exactly what does and does not work.
+> **Status: in progress.** The happy path, idempotency, failure modes, and the full
+> four-quadrant state machine work (V1–V4). The timeline endpoint is not built yet — see
+> [Build progress](#build-progress).
 
 ## Quick start
 
@@ -191,13 +191,61 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 | V1 | Walking skeleton — happy path end to end | ✅ |
 | V2 | Idempotency — claim, replay, conflict, concurrency test | ✅ |
 | V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | ✅ |
-| V4 | State machine — all terminal states, the four quadrants | — |
+| V4 | State machine — all terminal states, the four quadrants | ✅ |
 | V5 | Timeline endpoint | — |
 | V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
 
-**Not built yet.** The workflow does not yet catch a permanently-failed step, so a declined
-card currently surfaces as a `500` instead of `402 payment_failed`. `confirmed` is still the
-only terminal state a caller sees. There is no timeline endpoint. Both land in V4/V5.
+**Not built yet.** There is no `GET /bookings/:id/timeline` endpoint (V5), and no automatic
+refund when a booking ends `charged_not_booked` — that is the assignment's own top
+nice-to-have and is deferred (`PLAN.md` A4).
+
+### The four-quadrant failure matrix
+
+Every quadrant of (charged | not) x (booked | not) is a **named state with its own response
+arm**, so "handles the matrix" is something the tests check rather than something this
+README asserts. Nothing falls through to an opaque `5xx`.
+
+| Charged | Booked | State | HTTP | `requiresIntervention` |
+|---|---|---|---|---|
+| ✅ | ✅ | `confirmed` | `201` | false |
+| ❌ | ❌ | `inventory_unavailable` | `409` | false |
+| ❌ | ❌ | `payment_failed` (hold released) | `402` | false |
+| ✅ | ❌ | `charged_not_booked` | `409` | **true** |
+| ❓ | ❌ | `payment_pending` | `409` | **true** |
+| ❌ | ✅ | — **unreachable by construction** | — | — |
+
+The last row is the interesting one: the order is hold → charge → consume, so we only
+consume after a successful charge. **Booked-but-not-charged cannot happen**, which is a
+stronger claim than handling it. Charging first would have put money at risk instead of
+inventory for the same effort.
+
+Two deliberate asymmetries:
+
+- `payment_failed` **releases** the hold; `payment_pending` **does not**. A pending charge
+  may still settle, and releasing inventory we might owe the customer would turn an
+  uncertain state into a definitely-broken one.
+- A failed release is a **field** (`holdReleased: false`), not a state. No money moved, and
+  the hold expires on its own, so it is recorded rather than escalated.
+
+`requiresIntervention` is a flag, not a state, on purpose. Collapsing `charged_not_booked`
+and `payment_pending` into one `needs_manual_intervention` bucket would destroy the
+diagnosis — one needs a refund, the other needs someone to wait. The state names *what
+happened*; the flag says *who has to act*. It is also the alerting signal, which is why
+these return `409` and not `500`: a `5xx` would trip retry middleware and bury a correct
+workflow outcome in generic server-error noise.
+
+```bash
+curl -X POST http://localhost:3000/bookings \
+  -H 'content-type: application/json' -H 'Idempotency-Key: demo-cnb' \
+  -H 'X-Chaos: consume=permanent' \
+  -d '{"offerId":"offer-abc","amountCents":12500,"currency":"GBP"}'
+```
+```jsonc
+// 409 — we understand this state precisely, so it is not a 500
+{ "bookingId": "bkg_3a6b1315-...", "state": "charged_not_booked",
+  "requiresIntervention": true, "holdId": "hold_fcd36998-...",
+  "chargeId": "ch_da293101-...", "reason": "hold expired" }
+```
 
 ### Does the concurrency test prove what it claims?
 

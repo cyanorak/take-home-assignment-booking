@@ -136,6 +136,32 @@ releaseStep.maxRetries = 2;
 // Workflow
 // ---------------------------------------------------------------------------
 
+/**
+ * Turns a surfaced step error into the `reason` an on-call engineer reads.
+ *
+ * Pure and deterministic, so it is safe in a workflow body. Strips the error
+ * class prefix WDK includes — "FatalError: hold expired" tells the reader how
+ * we classified it, which they can already see from the state; "hold expired"
+ * tells them what happened.
+ */
+function describe(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/^(FatalError|RetryableError|Error):\s*/, "");
+}
+
+/**
+ * The workflow RETURNS its failures; it never throws them (PLAN.md §11.3).
+ *
+ * If a step exhausts its retries and we let the error propagate, `returnValue`
+ * rejects, and the handler awaiting it cannot tell `payment_failed` — a
+ * modelled outcome with a 402 and a typed body — from a bug in our own code.
+ * Every failure arm would collapse into one opaque 500. So every modelled
+ * failure is caught and turned into a terminal record here, and only genuinely
+ * unexpected errors escape.
+ *
+ * This is also the only place with both the error and the context to write the
+ * `reason` an on-call engineer reads.
+ */
 export async function bookingWorkflow(
   bookingId: string,
   offerId: string,
@@ -145,27 +171,101 @@ export async function bookingWorkflow(
 ): Promise<BookingOutcome> {
   "use workflow";
 
-  // Keys derive from the booking, never from the execution. Two runs for one
-  // booking would produce identical keys — which is what makes L2 hold even
-  // when L1 fails. See src/domain/keys.ts.
-  const hold = await holdStep(
-    offerId,
-    providerIdempotencyKey(bookingId, "hold"),
-    script,
-  );
+  // --- hold ---------------------------------------------------------------
+  // Inventory first: it is the scarce resource, and releasing a hold is cheaper
+  // and safer than moving money back. This ordering is also what makes
+  // booked-but-not-charged unreachable (§10.1).
+  let hold: Hold;
+  try {
+    // Keys derive from the booking, never from the execution. Two runs for one
+    // booking would produce identical keys — which is what makes L2 hold even
+    // when L1 fails. See src/domain/keys.ts.
+    hold = await holdStep(offerId, providerIdempotencyKey(bookingId, "hold"), script);
+  } catch (error) {
+    // Nothing held, nothing charged. The cleanest failure there is.
+    return { state: "inventory_unavailable", reason: describe(error) };
+  }
 
-  const charge = await chargeStep(
-    amountCents,
-    currency,
-    providerIdempotencyKey(bookingId, "charge"),
-    script,
-  );
+  // --- charge -------------------------------------------------------------
+  let charge: Charge;
+  try {
+    charge = await chargeStep(
+      amountCents,
+      currency,
+      providerIdempotencyKey(bookingId, "charge"),
+      script,
+    );
+  } catch (error) {
+    // No money moved, so give the inventory back. Best-effort: the hold carries
+    // expiresAt and the provider reclaims it regardless, so a failed release
+    // is recorded rather than escalated (§10.4).
+    return {
+      state: "payment_failed",
+      holdId: hold.holdId,
+      reason: describe(error),
+      holdReleased: await releaseQuietly(hold.holdId, script),
+    };
+  }
 
-  await consumeStep(hold.holdId, script);
+  if (charge.status === "pending") {
+    // The one failure no idempotency scheme can resolve: retrying returns
+    // `pending` again, because the information does not exist yet at the
+    // provider (CORRECTNESS.md §3.3b).
+    //
+    // Deliberately does NOT release the hold, unlike payment_failed. The charge
+    // may still settle, and releasing inventory we might owe the customer would
+    // turn an uncertain state into a definitely-broken one.
+    return {
+      state: "payment_pending",
+      holdId: hold.holdId,
+      chargeId: charge.chargeId,
+      reason: "provider returned a pending charge; outcome not yet knowable",
+    };
+  }
 
-  return {
-    state: "confirmed",
-    holdId: hold.holdId,
-    chargeId: charge.chargeId,
-  };
+  if (charge.status === "failed") {
+    return {
+      state: "payment_failed",
+      holdId: hold.holdId,
+      chargeId: charge.chargeId,
+      reason: "provider reported the charge as failed",
+      holdReleased: await releaseQuietly(hold.holdId, script),
+    };
+  }
+
+  // --- consume ------------------------------------------------------------
+  try {
+    await consumeStep(hold.holdId, script);
+  } catch (error) {
+    // THE quadrant: charged, not booked. We do not refund — that is the
+    // assignment's own top nice-to-have and is deferred (A4). What we owe is
+    // that this is never silent: an explicit state, the chargeId to act on,
+    // and requiresIntervention set on the way out.
+    return {
+      state: "charged_not_booked",
+      holdId: hold.holdId,
+      chargeId: charge.chargeId,
+      reason: describe(error),
+    };
+  }
+
+  return { state: "confirmed", holdId: hold.holdId, chargeId: charge.chargeId };
+}
+
+/**
+ * Releases a hold, reporting success rather than throwing.
+ *
+ * Lives in the workflow body, not a step, because "did the release work?" is a
+ * decision about what to record — and a step that swallowed its own failure
+ * could not be retried by the runtime.
+ */
+async function releaseQuietly(holdId: string, script: ChaosScript): Promise<boolean> {
+  try {
+    await releaseStep(holdId, script);
+    return true;
+  } catch {
+    // A dangling hold is visible via holdReleased: false and expires on its
+    // own. No money is involved, so it does not warrant intervention.
+    return false;
+  }
 }

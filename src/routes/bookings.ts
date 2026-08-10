@@ -22,11 +22,8 @@ import { fingerprint, validateBookingRequest } from "../domain/request.js";
 import { applyOutcome, attachRun, createBooking } from "../store/bookings.js";
 import { claim, settle, type IdempotencyRecord } from "../store/idempotency.js";
 import { parseChaosHeader, type ChaosScript } from "../providers/chaos.js";
-import {
-  requiresIntervention,
-  type BookingOutcome,
-  type BookingRequest,
-} from "../domain/types.js";
+import { httpStatusFor, requiresIntervention } from "../domain/state.js";
+import type { BookingOutcome, BookingRequest } from "../domain/types.js";
 
 /** A fully-formed response, cached so a replay is byte-identical. */
 type BookingResult = {
@@ -134,14 +131,20 @@ async function runBooking(
   const outcome = (await run.returnValue) as BookingOutcome;
   const settled = applyOutcome(booking.id, outcome);
 
+  // One arm per terminal state (PLAN.md §12.1). The status code carries the
+  // class; `state` is the contract; `reason` is for the human reading it.
   const result: BookingResult = {
-    status: 201,
+    status: httpStatusFor(settled.state),
     body: {
       bookingId: settled.id,
       state: settled.state,
       requiresIntervention: requiresIntervention(settled.state),
-      holdId: settled.holdId,
-      chargeId: settled.chargeId,
+      ...(settled.holdId ? { holdId: settled.holdId } : {}),
+      ...(settled.chargeId ? { chargeId: settled.chargeId } : {}),
+      ...(settled.reason ? { reason: settled.reason } : {}),
+      ...(settled.holdReleased !== undefined
+        ? { holdReleased: settled.holdReleased }
+        : {}),
     },
   };
   settle(record, result);

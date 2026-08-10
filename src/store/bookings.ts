@@ -6,6 +6,7 @@
  * copy nobody can read.
  */
 import type { Booking, BookingOutcome, BookingRequest } from "../domain/types.js";
+import { assertTransition } from "../domain/state.js";
 
 const bookings = new Map<string, Booking>();
 
@@ -36,13 +37,21 @@ export function attachRun(bookingId: string, runId: string): void {
   booking.updatedAt = new Date().toISOString();
 }
 
-/** Applies the workflow's returned outcome. PLAN.md §11.1. */
+/**
+ * Applies the workflow's returned outcome. PLAN.md §11.1.
+ *
+ * Guarded by the state machine (L4): writing a second outcome over a settled
+ * booking is an illegal transition and throws. Terminal states have no outgoing
+ * transitions, so a replay bug that tried to re-settle a booking would fail
+ * loudly here rather than quietly overwriting what actually happened.
+ */
 export function applyOutcome(
   bookingId: string,
   outcome: BookingOutcome,
 ): Booking {
   const booking = bookings.get(bookingId);
   if (!booking) throw new Error(`unknown booking: ${bookingId}`);
+  assertTransition(bookingId, booking.state, outcome.state);
   Object.assign(booking, outcome, { updatedAt: new Date().toISOString() });
   return booking;
 }

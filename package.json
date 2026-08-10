@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "nitro dev",
     "build": "nitro build",
+    "clean": "rm -rf .nitro .workflow-data",
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
