@@ -4,10 +4,10 @@ I had claude look over the whole assignment, saying we would do the extra work i
 Then I complicated things more, after seeing a partial plan and suggesting we design for production and multiple servers. This complicated the state machine greatly, and after re-reading the instructions seeing this explictly called out as dont do, I greatly simplified.
 
 ### Your overall approach
-I went first into pulling requirements, constraints, nice to haves, and details for my CORRECTNESS.md at the beginning, then moved onto planning. Planning took longer than I expected as the implementation plan got too complex, more than what was asked for, and I had to cut it back. After the plan and checking the plan we went into a 4 phase implementation. Fixing and writing tests as we went. Then I also used claudes help for the reflection and write up.
+I went first into pulling requirements, constraints, nice to haves, and details for my CORRECTNESS.md at the beginning, then moved onto planning. I put the complete assignment into ASSIGNMENT.md, and purposefully did not commit it to the public repo. Planning took longer than I expected as the implementation plan got too complex, more than what was asked for, and I had to cut it back. After the plan and checking the plan we went into a 4 phase implementation. Fixing and writing tests as we went. Then I also used claudes help for the reflection and write up.
 
 ### What you reviewed by hand vs. trusted
-I reviewed  a lot of the plan by hand and gave feedback. I ended up short on time and scanned code, but did not review as closely as I would have liked.
+I reviewed a lot of the plan by hand and gave feedback. I ended up short on time and scanned code, but did not review as closely as I would have liked.
 
 ### Where your workflow runtime doesn't help
 The biggest thing was still requiring some local state. My simple approach is not production ready, needing shared state across appservers.
@@ -15,7 +15,15 @@ The biggest thing was still requiring some local state. My simple approach is no
 ### What you'd do differently next time.
 I may have scripped the original ASSIGNMENT.md, which I copied all from the ask, and remove sections like the nice to haves, and make the language more clear around limiting what we implement. Time was my issue going too complicated to begin then needing multiple planning iterations to simplify.
 
-13:00 pushed back on workflow engine
+## Known gaps
+- No automatic refund (deferred by decision, see prompt 7).
+- Single process, in-memory: nothing survives a restart, and in-flight runs do not resume —
+  that last one is a property of the WDK World, not of this code.
+- Nothing evicts. A real deployment needs a retention policy for idempotency records.
+- A `pending` charge is reported, never resolved. Resolving it needs the webhook flow.
+
+# Annotated prompt notes
+13:00 pushed back on workflow engine, Vercel
 13:08 redirected
 13:45 cutting scope
 13:57 asking for options
@@ -24,12 +32,9 @@ I may have scripped the original ASSIGNMENT.md, which I copied all from the ask,
 15:30 Added environment check on chaos testing header
 
 
-================== EDIT BELOW THIS LINE ==================
+## AI Assisted Annotated prompts
 
-
-## Annotated prompts
-
-Ten moments where a decision actually changed. Timestamps match the reflection above.
+I took my notes and had Claude fill them out for these examples.
 
 ---
 
@@ -193,48 +198,3 @@ read. It now returns the outcome from the workflow and the handler persists it �
 what it replaced. This is the clearest case where refusing to assume was worth the ten
 minutes: the alternative was discovering it three verticals deep.
 
----
-
-## What was verified, and how
-
-The brief asks for honesty about what was not verified. Concretely:
-
-| Claim | How it was established |
-|---|---|
-| The concurrency test proves what it claims | **Mutation** — disabling the claim so every request believes it is the first fails all six idempotency tests |
-| Providers charge once under `applied_then_lost` | **Directly**, in a unit test, via a provider charge count before and after |
-| Every retry attempt uses the same key | **Through the runtime's step log** — provider state is unreadable from the test process |
-| Nothing falls through to a 5xx | A test running eight scripted failures asserting every status is < 500 |
-| The server actually serves | **`scripts/smoke.sh` over real HTTP** — the integration suite drives the app in-process and bypasses the server wiring entirely |
-
-That last row is not theoretical. Twelve green tests once coexisted with a server that
-returned 500 to every request, because the Nitro handler format was wrong and
-`app.request()` never touches Nitro. Hand-testing with curl caught it; the suite
-structurally could not.
-
-## Where the assistant was wrong
-
-Recorded because it is the more useful half of the transcript, and because four of these
-were only caught by inspecting the real API rather than trusting the documentation:
-
-1. Ranked the chosen runtime last on setup cost, from priors rather than evidence.
-2. Concluded there was no programmatic API for run history — there is, under the World SDK.
-   Finding it deleted a planned bespoke provider-call log.
-3. Wrote booking-state persistence into the step, twice, before a probe disproved it.
-4. Assumed `world.steps.list()` returns one row per attempt. It returns one row per step with
-   an `attempt` counter.
-5. Assumed step input/output load by default. They need `resolveData: "all"`.
-6. Missed that `runs.list()` paginates. An unpaginated count silently saturated at one page,
-   so the M7 delta assertion read zero — and it had been passing only because history was
-   still small. It would have degraded invisibly.
-7. Shipped a retry backoff that never escalated: the steps took `attempt` as a parameter the
-   workflow had no way to supply, so it was always 1. Nothing failed; the escalation existed
-   only in the comment. Found by reading the code in the final review, not by a test.
-
-## Known gaps
-
-- No automatic refund (deferred by decision, see prompt 7).
-- Single process, in-memory: nothing survives a restart, and in-flight runs do not resume —
-  that last one is a property of the WDK World, not of this code.
-- Nothing evicts. A real deployment needs a retention policy for idempotency records.
-- A `pending` charge is reported, never resolved. Resolving it needs the webhook flow.

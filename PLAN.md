@@ -873,29 +873,27 @@ about how WDK behaves, answered by running code (§11), not by a judgement call.
 
 Implementation may begin with the spike.
 
-## 6. Still to be written
+## 6. Written during the build
 
-- **§10 Booking state machine** — ✅ **written**. Was the largest gap; unblocked by A4.
-- **§11 Spike + workflow decomposition** — each step, its side effect, its retry semantics,
-  its idempotency key derivation (A13 gives the rule; §11 applies it). Grading criterion #2.
-  Opens with the spike question list, since two of them can change the decomposition.
+Everything listed here as pending during planning was written. Recorded so the document
+reads as a history rather than a set of open promises.
+
+- **§10 Booking state machine** — the largest planning gap; unblocked by A4.
+- **§11 Workflow decomposition** — each step, its side effect, its retry semantics, its key
+  derivation. Grading criterion #2.
 - **§12 API contracts** — request schema and the response union, one arm per §10 state.
-- **§13 Timeline envelope schema.** Blocked on A12 (cheap answer: envelope).
-- **§14 Build sequence in increments**, each leaving the service runnable.
-- **`CORRECTNESS.md` §5/§6/§7** — happy path, failure taxonomy, test matrix. §10 supplies
-  the terminal states these map onto, so this is now mechanical.
+- **§13 Build sequence** — the six verticals, each runnable and committed.
+- **`CORRECTNESS.md` §5/§6/§7** — happy path, failure taxonomy, test matrix.
 
-Still undecided and not written anywhere, all small, none to be discovered while coding:
+The three small items left undecided at plan time were resolved in code:
 
-- Whether validation happens **before or after** the L1 claim. Validate-first means a
-  malformed body does not burn the key; it also means a rejected request's fingerprint is
-  never stored, so a corrected retry under the same key succeeds rather than `409`s. That
-  is probably right, but it is a decision.
-- Whether the idempotency record and the booking record are **one store or two**. They
-  overlap heavily; §10.5 argues their *lifecycles* are separate, which is not the same
-  question as whether they share a `Map`.
-- L2 key derivation is specified for `hold`/`charge`/`refund` but not `consume`/`release`
-  — closed by A16 either way, but the table needs the two extra rows.
+- **Validation runs before the claim** (§11.5), so a malformed body cannot burn a key. The
+  accepted consequence — a corrected retry under the same key succeeds rather than
+  conflicting — is tested in `tests/edge-cases.integration.test.ts`.
+- **Two stores, not one** (§10.5): `Map<idempotencyKey, Record>` and
+  `Map<bookingId, Booking>`. Two key spaces, two lifecycles.
+- **Key derivation covers the two creates only** — `hold` and `charge`. A16 established that
+  `consume`/`release`/`refund` are keyed by the resource id itself.
 
 ## 7. Deliberate cuts
 

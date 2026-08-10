@@ -4,8 +4,8 @@ A small booking service that holds inventory through one mock provider, charges 
 another, and returns a typed response — built on a durable workflow runtime, with an audit
 timeline that explains what happened to any booking.
 
-> **Status:** all functionality is built (V1–V5). `PROCESS.md` and the final decision
-> write-up remain — see [Build progress](#build-progress).
+> **Status: complete.** All six build verticals are done. 110 tests (58 unit, 52
+> integration) plus a smoke script that exercises the running server over real HTTP.
 
 ## Quick start
 
@@ -234,7 +234,7 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 | V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | ✅ |
 | V4 | State machine — all terminal states, the four quadrants | ✅ |
 | V5 | Timeline endpoint | ✅ |
-| V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
+| V6 | Docs — decisions, known gaps, `PROCESS.md` | ✅ |
 
 **Deliberately not built.** No automatic refund when a booking ends `charged_not_booked` —
 that is the assignment's own top nice-to-have and is deferred (`PLAN.md` A4). The state is
