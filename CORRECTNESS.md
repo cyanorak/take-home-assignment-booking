@@ -89,9 +89,8 @@ keyed by `Idempotency-Key`:
 
 - **Insert succeeded** ⇒ this request is the owner. It proceeds to start the workflow.
 - **Insert failed (key exists)** ⇒ this request is a duplicate. It does *not* start
-  anything; it reads the existing record and either replays the stored terminal response,
-  or joins the in-flight run by `runId` and awaits the same outcome (subject to A1's
-  deadline).
+  anything; it reads the existing record and either replays the stored terminal response or
+  awaits the winner's in-flight promise.
 
 This is a **unique constraint, not a lock**. It is not leased, it does not expire as part
 of the correctness path, and it is not released on completion — it must outlive the run,
@@ -114,24 +113,30 @@ claim(key, fingerprint) -> { outcome: 'claimed' }
 No `get`-then-`set`. That shape is what makes the §1.2 seam a one-line swap for `SET NX`
 if this ever needed to be more than one server — but we build only the `Map`.
 
-**The loser's join path.** A request that gets `exists` never starts anything. Three cases,
-in order:
+**The loser's join path.** A request that gets `exists` never starts anything. It awaits the
+winner's in-flight promise, or replays the stored response if the winner already finished:
 
-| Record state | Response |
-|---|---|
-| `terminal` | Replay the stored response. Needed for I5 regardless, so not extra machinery. |
-| `running` (has `runId`) | `Promise.race([getRun(runId).returnValue, deadline])` — same outcome as the winner, same deadline as the winner (A1). |
-| `claimed` (no `runId` yet) | **`202` with the `bookingId`.** |
+```ts
+const r = claim(key, fingerprint);          // synchronous — no await inside
+if (r.outcome === 'claimed') {
+  r.record.inflight = runBooking(...);      // async fn returns its promise immediately,
+  return await r.record.inflight;           // so this lands in the same turn as the claim
+}
+return await (r.record.inflight ?? r.record.response);
+```
 
-The third row is the claim/start race window, and returning `202` is simply the honest
-answer: we genuinely do not know the outcome yet, which is exactly what `202` means.
+Because calling an async function returns its promise *synchronously*, there is no window
+in which a record is claimed but has nothing to await. `inflight` is a field on the record,
+not a second `Map`, and there is no ordering rule to get wrong.
 
-> An earlier draft required the winner to register an in-flight `Promise` in a second `Map`
-> **in the same synchronous turn as the claim**, so a loser could always find something to
-> await. That was over-engineering — it added the subtlest ordering constraint in the
-> service to avoid a `202` that the contract already supports. Cut.
+Both concurrent requests therefore receive **byte-identical responses** — which is the
+assertion M7 is really asking for, and what T-conc-1 exercises.
 
-This path is what T-conc-1 exercises.
+> Two earlier drafts circled this. One used a separate in-flight `Map` with a
+> same-synchronous-turn ordering constraint (over-engineered). The next cut that entirely
+> and returned `202` in the race window, which was simpler but made the two concurrent
+> responses differ. Storing the promise *on the record* gets the simplicity of the second
+> with the identical responses of the first. See `PLAN.md` A1.
 
 **Why WDK cannot provide this itself:** `start()` takes no caller-supplied run id or
 idempotency key, and the framework's documented dedup is post-hoc — both callers may
@@ -368,16 +373,9 @@ and ordered — build top-down and stop when the budget runs out:
   `Promise.all`. Asserts I4 via `world.runs.list()`, the runtime's own registry
   (`PLAN.md` A11), plus one hold and one charge at the providers. This is the test the
   assignment explicitly requires, in the shape it explicitly suggests.
-- **T-deadline-1** *(core)* — the `202` arm of A1. Provider scripted `slow(ms)` with the
-  deadline injected at ~50ms, so the test is fast. Asserts, in order:
-  1. `POST` returns **`202`** with a `bookingId` and a non-terminal state;
-  2. the workflow **keeps running** after the response — `202` is not abandonment;
-  3. the booking subsequently reaches a terminal state;
-  4. `GET /bookings/:id/timeline` shows the whole run, so the caller who gave up on the
-     long-poll can still find out what happened.
-
-  Point 2 is the one that matters. A `202` that quietly dropped the work would pass a
-  naive version of this test, and it is the failure mode the async design exists to avoid.
+T-conc-1 asserts responses are **byte-identical**, not merely equivalent. Under A1 (fully
+synchronous) both requests await the same in-flight promise, so anything less would mean the
+loser took a different path — which is the bug.
 
 Deferred and cut, recorded so each absence is deliberate:
 
@@ -471,15 +469,113 @@ in-memory a cop-out?":
 
 ## 5. Happy path
 
-*To be written.*
+The sequence every failure in §6 is a deviation from. States are `PLAN.md` §10; steps are
+§11.
+
+| # | Where | Action | Invariant in play |
+|---|---|---|---|
+| 1 | Handler | Validate body and `Idempotency-Key`. Reject before claiming (§11.4) | — |
+| 2 | Handler | Compute request fingerprint over the canonicalised body | I5 |
+| 3 | Handler | **`claim(key, fingerprint)`** — one synchronous turn, no `await` inside | **I4** |
+| 4 | Handler | Allocate `bookingId`; write booking `pending`; record → `running(runId)` | L2 needs a stable id before any provider call |
+| 5 | Handler | `start(bookingWorkflow, [bookingId, offerId, amountCents, currency, chaos])` | A18 — everything a step needs is an argument |
+| 6 | Workflow | `holdStep(offerId, "bkg:{id}:hold")` → `Hold` | I2, I6 |
+| 7 | Workflow | `pending → held` | — |
+| 8 | Workflow | `chargeStep(amountCents, currency, "bkg:{id}:charge")` → `Charge{succeeded}` | I1, I6 |
+| 9 | Workflow | `held → charged` | — |
+| 10 | Workflow | `consumeStep(holdId)` | I6 |
+| 11 | Workflow | `charged → confirmed` | — |
+| 12 | Handler | `await run.returnValue`; store the terminal response on the record | I5 |
+| 13 | Handler | **`201`** `{ bookingId, state: "confirmed", holdId, chargeId }` | I7 |
+
+Three things about this sequence are load-bearing rather than incidental:
+
+- **Steps 3–5 happen before any workflow exists.** The claim, the id, and the fingerprint
+  are all preconditions for the run, not products of it.
+- **Step 4 precedes step 6** because L2's keys derive from `bookingId`. Allocating the id
+  inside the workflow would make the keys depend on execution identity — the mistake §3/L2
+  exists to prevent.
+- **Step 12 stores the response.** Without it, I5's replay has nothing to replay, and a
+  duplicate arriving after completion would have to re-derive the answer.
 
 ## 6. Failure taxonomy
 
-*To be written: the four-quadrant matrix, provider failure modes (transient 5xx, timeout,
-applied-then-lost), unknown outcomes, expiry, compensation failures, network and runtime
-faults, and the terminal state each produces.*
+Every row lands in a named state (`PLAN.md` §10). Nothing falls through to a bare `500`.
+
+### 6.1 The four quadrants (M6)
+
+| Charged | Booked | State | HTTP | Reachable via |
+|---|---|---|---|---|
+| ✅ | ✅ | `confirmed` | `201` | Happy path |
+| ❌ | ❌ | `inventory_unavailable` | `409` | Hold fails permanently |
+| ❌ | ❌ | `payment_failed` | `402` | Charge fails permanently; hold released |
+| ✅ | ❌ | `charged_not_booked` | `409` ⚠️ | Consume fails permanently after a good charge |
+| ❌ | ✅ | — | — | **Unreachable by construction** (§10.1) |
+
+The fourth quadrant is closed by ordering, not by handling: we only consume after a
+successful charge. Worth stating in the README, because "we handled all four" and "one of
+them cannot occur" are different claims and the second is stronger.
+
+### 6.2 Provider failure modes × step
+
+`applied_then_lost` is the important row. It is the only mode where the provider's state and
+our knowledge of it disagree, and it is what L2 exists for.
+
+| Mode | On `hold` | On `charge` | On `consume` |
+|---|---|---|---|
+| `http_5xx` | Retry (≤3), same key ⇒ one hold | Retry (≤3), same key ⇒ one charge | Retry (≤5), no-op on repeat |
+| `timeout` | As above — nothing committed | As above | As above |
+| **`applied_then_lost`** | **Retry returns the original hold.** I2 holds | **Retry returns the original charge.** I1 holds — the exercise's core case | Retry finds it `consumed`, returns success (A16) |
+| exhausted retries | `inventory_unavailable` | `payment_failed` (release hold) | `charged_not_booked` ⚠️ |
+| `FatalError` | `inventory_unavailable` | `payment_failed` | `charged_not_booked` ⚠️ |
+| `pending` | n/a | `payment_pending` ⚠️ | n/a |
+
+### 6.3 Failures outside the provider calls
+
+| Situation | Outcome |
+|---|---|
+| Missing/empty `Idempotency-Key` | `400`, no booking created |
+| Invalid body | `400`, no booking created, **key not burned** (§11.4) |
+| Same key, same fingerprint, terminal | Replay stored response (I5) |
+| Same key, same fingerprint, in-flight | Await the winner's `inflight` promise; identical response (§3/L1) |
+| Same key, **different** fingerprint | `409 idempotency_key_reuse` (I5) |
+| A provider hangs | **The request hangs.** No deadline (A1) — accepted, documented limitation |
+| Release fails after payment failure | `payment_failed` + `holdReleased: false` (§10.4) |
+| Unknown `bookingId` on timeline | `404`, typed |
+| Process restart mid-run | Run does not resume (§4.5). Booking is stranded non-terminal — a **known, documented gap** |
+
+### 6.4 What is deliberately *not* in this taxonomy
+
+Hold expiry mid-flight (cut, §7); refund after `charged_not_booked` (deferred, N1);
+webhook resolution of `payment_pending` (deferred, N2); concurrent-run split-brain
+(unreachable — L4's CAS was cut with it).
 
 ## 7. Test matrix
 
-*To be written: each row a scenario, its provider script, the expected terminal state, the
-expected response, and the invariants asserted.*
+Each row: provider script → expected state, HTTP, and invariants asserted. Ordered by
+build vertical (`PLAN.md` §13) so tests land with the code they cover.
+
+| V | Test | Script | Expect | Asserts |
+|---|---|---|---|---|
+| V1 | happy path | all `ok` | `confirmed`, `201` | one hold, one charge, hold `consumed` |
+| V2 | replay | all `ok`, POST twice sequentially | identical response both times | I5; one charge total |
+| V2 | fingerprint conflict | same key, changed `amountCents` | `409 idempotency_key_reuse` | I5; **no** second charge |
+| V2 | **T-conc-1** | all `ok`, `Promise.all` ×2 | **byte-identical** responses | **I4** via `world.runs.list()` = 1; one hold; one charge |
+| V3 | transient recovery | `http_5xx` ×2 then `ok` on charge | `confirmed` | exactly **one** charge; timeline shows 3 attempts |
+| V3 | **`applied_then_lost` on charge** | charge commits then throws; retry `ok` | `confirmed` | **I1 — exactly one charge.** The single most important test |
+| V3 | `applied_then_lost` on hold | hold commits then throws; retry `ok` | `confirmed` | **I2 — exactly one hold** |
+| V4 | hold fails | `hold: FatalError` | `inventory_unavailable`, `409` | no charge attempted |
+| V4 | charge declined | `charge: FatalError` | `payment_failed`, `402` | hold released; `holdReleased: true` |
+| V4 | release also fails | `charge: FatalError`, `release: FatalError` | `payment_failed`, `402` | `holdReleased: false`; `requiresIntervention: false` |
+| V4 | **charged, not booked** | `consume: FatalError` | `charged_not_booked`, `409` | `requiresIntervention: **true**`; `chargeId` present |
+| V4 | pending charge | `charge: pending` | `payment_pending`, `409` | `requiresIntervention: **true**` |
+| V5 | timeline, success | all `ok` | `200` envelope | every step present with attempts and durations; `runId` set |
+| V5 | timeline, failure | `consume: FatalError` | `200` envelope | shows each consume attempt and the reason it stopped |
+| V5 | timeline, unknown id | — | `404` typed | — |
+
+Deferred (`PLAN.md` §2.2): L1 disabled to prove L2 independently (N5); two runs racing a
+transition (N4).
+
+**The rows that carry the grade** are `applied_then_lost` on charge (I1 — the exercise's
+central case), T-conc-1 (M7, and the assignment names the assertion), and charged-not-booked
+(M6's hard quadrant). If the budget collapses, those three survive.
