@@ -84,24 +84,46 @@ constraint, not a suggestion. It is satisfied by projecting WDK's own event/step
 (D1.1/C2) merged with the idempotency and booking records correctness already requires —
 we add no storage whose only purpose is audit.
 
-### 2.1 Nice-to-have (only if time remains, in this priority order)
+### 2.1 Core — build this first, and completely
 
-| # | Item | Our stance |
+Nothing outside this list may be started until all of it works. In priority order:
+
+1. `POST /bookings` with L1 atomic claim + fingerprint replay/conflict (M1, M7)
+2. The two mock providers with scripted failure modes (M3, M4, M5)
+3. The workflow: hold → charge → consume, deterministic keys per L2 (M2, M6)
+4. Compensation for the charged-but-not-booked quadrant (M6, and see A4)
+5. `GET /bookings/:id/timeline` projecting WDK's log + our records (M8)
+6. The targeted test set (§12 when written; `CORRECTNESS.md` §4.3)
+7. `README.md`, `PROCESS.md` (M9, M10, M11)
+
+### 2.2 Nice-to-have — do not start until §2.1 is done
+
+| # | Item | Trigger to build it |
 |---|---|---|
-| N1 | Refund flow when payment succeeded but inventory failed permanently | **Promote to must-have.** See A5 — without it M6 is hard to argue |
-| N2 | Webhook handler that resumes a durable workflow on a provider-initiated change | Strong signal for "durable"; candidate if time allows |
-| N3 | Provider-side state in the timeline, reconciled against ours | Cheap given our providers are in-process; high review value |
-| N4 | Anything else showing platform judgment | See §7 candidates |
+| N1 | Webhook/hook resume for a `pending` charge | Only if A17 lands on "resolve it"; otherwise `pending` is just an explicit state |
+| N2 | Provider-side state in the timeline, reconciled against ours | Cheap (providers are in-process) and high review value, but pure addition |
+| N3 | L3 — losing-run convergence via `hook.getConflict()` | Defence-in-depth behind L1; the reasoning is the deliverable, the code is optional |
+| N4 | Test T-conc-4 — two runs racing into compensation | Requires machinery to force two runs; the L4 CAS itself is core, proving it under race is not |
 
-### 2.2 Explicitly out of scope (from the assignment — do not build these)
+### 2.3 Out of scope — from the assignment, do not build
 
 - Authentication, accounts, users. Assume one trusted upstream caller.
 - Real third-party APIs. The mock providers are the only sources of truth.
 - Any UI. curl and tests are the interface.
-- Persistence beyond memory or a JSON file. No Postgres.
+- Persistence beyond memory. We do not even use the JSON-file option (D1.1/C3).
 - Production concerns: deployment, multi-region, rate limiting, secret rotation.
-- Comprehensive test coverage. Targeted failure-mode + concurrency tests only.
+  **We ship no deploy configuration and no Redis/Postgres implementation.** Naming the
+  primitive each would use is design documentation and costs nothing; building either is
+  out of scope.
+- Comprehensive test coverage. A handful of targeted failure-mode and concurrency tests.
 - A "complete" booking system.
+
+**Note on the tension with §1.1.** "Production concerns are out of scope" and "demonstrate
+production thinking" are not in conflict, but the line has to be drawn deliberately:
+*reasoning* about multi-instance correctness is graded (it is the idempotency criterion);
+*building* multi-instance infrastructure is out of scope. So the interfaces are
+production-shaped and documented, the implementations are in-memory, and we ship nothing
+operational.
 
 ## 3. What the reviewers said they weigh, in their order
 
@@ -326,8 +348,7 @@ idempotency key used, the request summary, and the response or error *shape*; ea
 with its reason and the backoff applied; compensation decisions and their outcome; final
 state with the reason it was reached.
 
-**Proposal — exclude:** raw HTTP framing, per-poll noise, full request/response bodies
-(summarise; redact anything payment-instrument-shaped), successful internal validation
+**Proposal — exclude:** raw HTTP framing, per-poll noise, successful internal validation
 steps, and anything that would be identical on every booking.
 
 **Source is now settled (D1.1/C2):** events come from `world.events.list({ runId })` and
@@ -341,15 +362,18 @@ is far easier for a human to read at 2am and lets us fold in N3 (provider-side s
 reconciliation). Leaning: envelope, with the events array as the merged projection, and
 `runId` included so a reviewer can corroborate against `npx workflow inspect run <runId>`.
 
-Two constraints the merge imposes, worth deciding before writing code:
+One constraint the merge imposes, worth deciding before writing code — **ordering**: our
+records and WDK's events have independent timestamps and no shared clock guarantee. Sort by
+timestamp, but carry an explicit `source: 'workflow' | 'service'` on every entry so an
+investigator can see which clock produced it rather than being silently misled by
+interleaving. One field, and it is the difference between a timeline someone can trust and
+one that quietly lies about causality.
 
-- **Ordering.** Our records and WDK's events have independent timestamps and no shared
-  clock guarantee. Sort by timestamp, but carry an explicit `source: 'workflow' | 'service'`
-  on every entry so an investigator can see which clock produced it rather than being
-  silently misled by interleaving.
-- **Redaction.** Step `input`/`output` are projected wholesale, so redaction must happen at
-  projection time, not at logging time. Anything payment-instrument-shaped gets summarised
-  before it reaches the response.
+**Cut: redaction.** An earlier draft required redacting payment-instrument data at
+projection time. Re-reading A7, the request carries only `offerId`, `amountCents`, and
+`currency` — there is no card data, token, or PII anywhere in the model, so this was
+machinery for a problem we do not have. Projecting step I/O wholesale is safe here. Noted
+in the README as a thing a real service would need and this one does not.
 
 ### A13 — What is durable-runtime "step" granularity here? `OPEN` — unblocked, resolve in §8
 
@@ -449,16 +473,16 @@ Options:
 - **Treat `pending` as terminal-unknown.** Booking rests in an explicit non-terminal state,
   response says so (A1's `pending` arm carries it naturally), timeline shows why. Cheapest,
   honest.
-- **Wait for resolution via a hook/webhook** — this is exactly what N2 is for, and it turns
+- **Wait for resolution via a hook/webhook** — this is exactly what N1 is for, and it turns
   the nice-to-have into the natural answer for a state the contract already forces on us.
   `createWebhook` + provider callback resumes the run.
 - **Poll with `sleep()`** inside the workflow until it resolves or a budget expires. Durable
   and simple; less elegant than a webhook but far cheaper to build.
 
-**Leaning:** treat `pending` as an explicit non-terminal state now (cheap, satisfies I7),
-and let N2's webhook resume be the stretch that resolves it. This is the strongest
-argument yet for promoting N2, because it stops being a bolt-on demo and becomes the answer
-to a state the provider contract already contains. Decide alongside A4 and D3.
+**Leaning:** treat `pending` as an explicit non-terminal state now — cheap, satisfies I7,
+and it is the *core* answer. N1's webhook resume is the stretch, and only earns its place
+if §2.1 is finished. The point stands that it would stop being a bolt-on demo and become
+the answer to a state the provider contract already contains. Decide alongside A4 and D3.
 
 ### A18 — Steps are isolated routes, so request-scoped state cannot reach them `OPEN` — verify in spike
 
@@ -703,23 +727,27 @@ Summary of what is still open, and what each blocks:
 - §12 Test plan (cross-referenced to `CORRECTNESS.md` §7)
 - §13 Deliberate cuts and known limitations
 
-## 7. Parked ideas (do not build without an explicit decision)
+## 7. Deliberate cuts
 
-Recorded so they are visibly *cut*, not forgotten:
+Every item here was considered and dropped. Cuts marked **README** must be stated in the
+README as known gaps — the assignment grades "what you cut and why", and a cut only counts
+as judgment if it is visible.
 
-- **Hold expiry** (`expiresAt` is in the given `Hold` type, so expiry is implied by the
-  contract). "The hold expired before we charged" is a real quadrant, and it interacts with
-  A1(c): if we return `pending` and the workflow continues, the hold can expire underneath
-  us. Currently **cut** — but the cut must be stated in the README rather than left as an
-  oversight, because the type contract raises the question.
-- Provider-view reconciliation in the timeline (N3) — cheap, high review value.
-- Metrics/structured logging beyond the journal projection.
-- Multiple offers per booking, partial fulfilment.
-- Idempotency record retention/expiry policy (`CORRECTNESS.md` §4.5).
-- Persistent local storage of any kind — deliberately cut by D1.1/C3.
+| Cut | Why | README |
+|---|---|---|
+| **Claim/start crash-window takeover** (`CORRECTNESS.md` §3.1) | The mechanism needs a state machine, a takeover threshold, and a CAS — and the failure it fixes **cannot be demonstrated locally at all**, because an in-memory store is wiped by the very restart that would trigger it. Keep the analysis, cut the code. | ✅ |
+| **Hold expiry** (`expiresAt` is in the given `Hold` type) | A real quadrant, and it interacts with A1(c) — if we return `pending`, the hold can expire underneath us. But it needs timers and a whole extra failure branch. The type contract raises the question, so silence would read as oversight rather than choice. | ✅ |
+| **Timeline redaction** | Solves a problem this model does not have: the request carries only `offerId`, `amountCents`, `currency`. No card data, tokens, or PII exist to redact. | ✅ |
+| **Restart recovery / persistent local storage** | Property of the World, not our code (D1.1/C3). Reimplementing it locally would be the hand-rolled durability rejected in D1, testing a mechanism production never runs. | ✅ |
+| **Redis/Postgres store implementations** | Out of scope per §2.3. The interface contract and the named primitive carry the design argument; the code would carry no additional signal. | ✅ |
+| **Idempotency record retention/expiry** | Production concern, explicitly out of scope. Worth one line, since a naive TTL would silently break I5. | ✅ |
+| **Status endpoint separate from the timeline** (A14) | The timeline already returns current state. Surface area without new information. | — |
+| **Metrics / structured logging** beyond the journal projection | The timeline *is* the observability deliverable. | — |
+| **Multiple offers per booking, partial fulfilment** | A "complete booking system" is explicitly out of scope. | — |
+| **Probabilistic failure injection** (A9) | Flaky tests are worse than no tests; cannot demonstrate a specific quadrant on demand. | — |
+| **Server-side pricing from `offerId`** (A7) | Needs a catalogue and a price-mismatch branch we cannot do well in the budget. | ✅ |
 
-Note that N2 (webhook resume) has **moved out of this list**: A17 makes it a candidate
-answer to a state the provider contract already forces on us, not a bolt-on.
+Deferred rather than cut: everything in §2.2, which is built only after §2.1 is complete.
 
 ## 8. Submission deliverables (do not discover these at the end)
 

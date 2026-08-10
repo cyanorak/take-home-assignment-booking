@@ -183,19 +183,22 @@ step name, with no access to workflow or step metadata. It is unit-tested for st
 against a frozen expected-value table, so a future change that reintroduces execution
 context fails a test rather than a customer.
 
-### L3 — Convergence if two runs exist anyway (prevents contradictory progress)
+### L3 — Convergence if two runs exist anyway (prevents contradictory progress) — DEFERRED
 
-L1 can fail: a partitioned store, a bug, a claim taken over after a crashed claimant
-(§3.1). L2 keeps the money safe but does not stop two runs from making *different
-decisions*. So the workflow itself must converge:
+L1 can fail: a partitioned store or a bug. L2 keeps the money safe but does not stop two
+runs from making *different decisions*. The workflow would converge by having its first
+step re-read the booking record and abort if another live run owns it — WDK's
+`hook.getConflict()` is the native form, and this is the role it is genuinely suited to.
+Abort means: return the owner's identity, take no compensating action, record the duplicate
+in the timeline. A losing run must never refund, release, or consume.
 
-- The first step re-reads the booking record and aborts if another run owns it and is
-  live. WDK's `hook.getConflict()` is the native form of this and we adopt it here — as a
-  second line of defence, which is the role it is actually suited to.
-- Abort means: return the owner's identity, take no compensating action, record the
-  duplicate in the timeline. A losing run must never refund, release, or consume.
+> **Status: DEFERRED to `PLAN.md` §2.2/N3.** L3 is defence-in-depth behind a working L1,
+> and it requires hook machinery. With the §3.1 takeover cut, the only path to two
+> concurrent runs is an L1 bug — and the right response to that is L4 plus a test, not a
+> second coordination layer. **L4 is core and is not deferred**, because it is what actually
+> protects I3, and it is nearly free.
 
-Guarantee: bounds **I3** damage.
+Guarantee (when built): bounds **I3** damage.
 
 ### L4 — Compare-and-set on decision transitions (prevents split-brain compensation)
 
@@ -222,26 +225,34 @@ L1 has one genuine gap. The owner may crash between claiming the key and recordi
 booking that will never progress — a permanently stuck key, which is worse than a
 duplicate.
 
-Resolution — the record carries a state, and only the intermediate state is time-bounded:
+The record carries a state, and only the intermediate state would be time-bounded:
 
 ```
 claimed(at)  ->  running(runId)  ->  terminal(response)
 ```
 
-A duplicate request that finds `claimed` older than a takeover threshold, with no
-`runId`, may **atomically take over** (a CAS on the record, so exactly one taker wins) and
-start the workflow itself.
+The full fix is takeover: a duplicate request finding `claimed` older than a threshold with
+no `runId` **atomically takes over** (a CAS, so exactly one taker wins) and starts the
+workflow itself. Takeover would be safe **because of L2** — if the original owner was slow
+rather than dead, the provider keys are identical, so I1/I2 hold and L4 prevents
+contradictory decisions. The layers compose: L2's determinism is what makes L1's recovery
+path affordable. It is a *liveness* timeout, not a mutual-exclusion lease; getting it wrong
+costs a redundant run, never a duplicate charge.
 
-Takeover is safe **because of L2**: if the original owner was merely slow rather than dead
-and starts its run after all, the provider keys are identical, so I1/I2 hold, and L3/L4
-prevent contradictory decisions. The layers compose — L2's determinism is what makes L1's
-recovery path affordable.
-
-This is the only place a timeout participates in correctness, and it is a *liveness*
-timeout, not a mutual-exclusion lease. Getting it wrong costs a duplicate run, not a
-duplicate charge. That is the trade we want, and it is worth stating explicitly in the
-README: **we chose to risk a redundant run rather than a stuck booking, because L2 makes
-redundant runs cheap and nothing makes a stuck booking cheap.**
+> **Status: analysis retained, mechanism CUT** (`PLAN.md` §7).
+>
+> The failure requires a crash between two adjacent statements, and **cannot be
+> demonstrated in the local configuration at all** — the in-memory store is destroyed by
+> the same restart that would trigger the recovery, so there is no state left to take over.
+> Building an untestable recovery path inside a two-hour budget is the wrong trade.
+>
+> **What we build instead:** the record still carries the `claimed → running → terminal`
+> states, because the state machine is needed anyway and costs nothing. We simply never
+> take over a stale claim. A booking stuck in `claimed` is therefore a permanent stuck key
+> in production, and that is a **known gap stated in the README**, not an unknown one.
+>
+> This is the honest version: we found the hole, we can describe the fix precisely, and we
+> declined to ship a recovery mechanism no test in this repo could exercise.
 
 ### 3.2 Layer summary
 
@@ -306,25 +317,33 @@ to disappear into "the mocks always return succeeded".
 
 ### 4.3 Testing the assumptions we cannot deploy
 
-Since we cannot run N replicas in a take-home, tests must attack the assumptions directly:
+Since we cannot run N replicas in a take-home, tests must attack the assumptions directly.
+The assignment asks for "a handful of targeted tests", so this list is deliberately short
+and ordered — build top-down and stop when the budget runs out:
 
-- **T-conc-1** — two concurrent POSTs, same key, one app instance. Asserts I4 by run count
-  (see `PLAN.md` A11).
-- **T-conc-2** — two concurrent POSTs, same key, **two independently constructed app
-  instances sharing one store**. This is the test that would fail if any invariant leaked
-  into module-level or request-local state. It is the closest we can get to multi-instance
-  without infrastructure, and it is cheap.
-- **T-conc-3** — L1 disabled by injection (simulating a store partition), two runs forced.
-  Asserts I1/I2 still hold via L2, proving the layers are genuinely independent rather
-  than nominally so.
-- **T-conc-4** — two runs forced into the compensation decision. Asserts L4's CAS admits
-  exactly one, and that the loser takes no provider action.
-- **T-crash-1** — a claim left in `claimed` with no `runId`; a later request takes over.
-  Asserts exactly one takeover under concurrency, and that I1/I2 survive the original
-  owner also proceeding.
+- **T-conc-1** *(core)* — two concurrent POSTs, same key, one app instance. Asserts I4 via
+  `world.runs.list()`, the runtime's own registry (`PLAN.md` A11). This is the test the
+  assignment explicitly requires.
+- **T-conc-2** *(core)* — two concurrent POSTs, same key, **two independently constructed
+  app instances sharing one store**. Fails if any invariant leaked into module-level or
+  request-local state, which T-conc-1 structurally cannot detect. ~10 lines, and it is what
+  makes the §1.1 production claim testable rather than asserted.
+- **T-conc-3** *(core, lowest priority of the three)* — L1 disabled by injection, two runs
+  forced. Asserts I1/I2 still hold via L2, proving the layers are genuinely independent
+  rather than nominally so. This is the best single piece of evidence for the layered
+  design; cut it only if the budget is genuinely gone.
 
-T-conc-3 and T-conc-4 are the tests that distinguish this design from one that merely
-passes the assignment's stated concurrency test.
+Deferred and cut, recorded so the absence is deliberate:
+
+- **T-conc-4** — two runs racing into the compensation decision (asserts L4's CAS admits
+  exactly one). Deferred to `PLAN.md` §2.2/N4: forcing the race needs machinery, and the
+  L4 CAS itself is core and unit-testable without it.
+- **T-crash-1** — claim takeover. **Cut with the mechanism** (§3.1): there is nothing to
+  test, because an in-memory store does not survive the restart that would trigger it.
+
+The remaining suite is the failure taxonomy (§6) driven through scripted providers: the
+four quadrants, `applied_then_lost`, timeout, transient 5xx with retry, replay, and the
+fingerprint conflict.
 
 ### 4.4 Ordering constraint derived from the above
 
@@ -401,15 +420,16 @@ and only locally.
 Accepted limitations, to be stated plainly in the README rather than implied:
 
 - Multi-instance correctness rests on the interface contract plus T-conc-2/3, not on a
-  deployed distributed store. We do not ship a Redis or Postgres implementation; we
-  specify the exact primitive each would use (§3/L1).
+  deployed distributed store. We ship no Redis or Postgres implementation; we specify the
+  exact primitive each would use (§3/L1).
 - Crash-resumption is not demonstrated, because the World a reviewer runs does not provide
   it. We name the World that does rather than claiming the property.
-- No fencing tokens. The §3.1 takeover can produce a redundant run; it cannot produce a
-  duplicate side effect. Deliberate trade, stated there.
-- Idempotency records are never expired. A production deployment needs a retention policy
-  (and the store's TTL semantics must not silently break I5 by evicting a key whose
-  response is still replayable).
+- **A claim stranded in `claimed` is never recovered** (§3.1). We can describe the fix
+  precisely and chose not to build it, because no test in this repo could exercise it.
+- Idempotency records are never expired. A production deployment needs a retention policy,
+  and a naive TTL would silently break I5 by evicting a key whose response is still
+  replayable.
+- I3's guarantee on the compensation path depends on how §3.3(a) is resolved.
 
 ## 5. Happy path
 
