@@ -17,6 +17,7 @@ dist/
 # Test / tooling output
 coverage/
 .vitest/
+.output/
 
 # Environment
 .env
