@@ -4,14 +4,33 @@ A small booking service that holds inventory through one mock provider, charges 
 another, and returns a typed response — built on a durable workflow runtime, with an audit
 timeline that explains what happened to any booking.
 
-> **Status: in progress.** The toolchain and the WDK probe are done (V1 partial). See
-> [Build progress](#build-progress) for exactly what does and does not work yet.
+> **Status: in progress.** The happy path works end to end (V1). Idempotency, failure
+> modes, the full state machine, and the timeline are not built yet — see
+> [Build progress](#build-progress) for exactly what does and does not work.
 
 ## Quick start
 
 ```bash
 npm install
 npm run dev          # http://localhost:3000
+```
+
+```bash
+curl -X POST http://localhost:3000/bookings \
+  -H 'content-type: application/json' \
+  -H 'Idempotency-Key: demo-1' \
+  -d '{"offerId":"offer-abc","amountCents":12500,"currency":"GBP"}'
+```
+
+```jsonc
+// 201
+{
+  "bookingId": "bkg_6fbb3945-...",
+  "state": "confirmed",
+  "requiresIntervention": false,
+  "holdId": "hold_6d44f069-...",
+  "chargeId": "ch_a21da0ee-..."
+}
 ```
 
 ```bash
@@ -70,12 +89,16 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 
 | | Vertical | Status |
 |---|---|---|
-| V1 | Walking skeleton — happy path end to end | 🚧 toolchain + probe done |
+| V1 | Walking skeleton — happy path end to end | ✅ |
 | V2 | Idempotency — claim, replay, conflict, concurrency test | — |
 | V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | — |
 | V4 | State machine — all terminal states, the four quadrants | — |
 | V5 | Timeline endpoint | — |
 | V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
+
+**What V1 does not do yet.** `Idempotency-Key` is required and stored, but nothing
+deduplicates on it — two identical requests currently produce two bookings. Every provider
+call succeeds, so no failure state is reachable. There is no timeline endpoint.
 
 ## Known limitations
 
@@ -96,12 +119,27 @@ Stated here rather than left for a reader to discover. Fuller list in `CORRECTNE
 
 ```
 src/
-  index.ts        Hono app and routes
+  index.ts              Hono app composition
+  routes/bookings.ts    POST /bookings — validate, start, await, persist, respond
+  workflows/booking.ts  the workflow and its steps, each annotated with what a
+                        retry of it does in the world
+  providers/            mock InventoryProvider and PaymentProvider
+  domain/
+    types.ts            provider contracts and the booking state machine
+    keys.ts             L2 idempotency key derivation (frozen by unit test)
+    request.ts          validation and request fingerprinting
+  store/bookings.ts     in-memory booking store (handler-side only)
 tests/
-  *.test.ts             unit tests (no workflow runtime)
-  *.integration.test.ts integration tests (in-process Local World)
-nitro.config.ts   build config — loads the workflow module
+  *.test.ts             unit tests — no workflow runtime, fast
+  *.integration.test.ts integration tests — in-process Local World, no server
+nitro.config.ts         build config; loads workflow/nitro to compile directives
 ```
+
+**Why `src/store` is handler-side only.** Steps execute in a separate module instance from
+the HTTP handler — verified by probe during V1, writes cross in neither direction. So steps
+are pure provider wrappers, the workflow *returns* its outcome, and the handler persists it.
+Provider state is the mirror image: it lives in module-level maps that all step routes
+share, and is therefore only reachable from inside a step.
 
 ## Observability
 
