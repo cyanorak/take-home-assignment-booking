@@ -22,5 +22,7 @@ export default defineConfig({
      * assignment explicitly asks us to make.
      */
     fileParallelism: false,
+    /** Clears .workflow-data once per run — see the setup file for why. */
+    globalSetup: "./vitest.integration.setup.ts",
   },
 });

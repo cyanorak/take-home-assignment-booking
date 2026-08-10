@@ -313,6 +313,19 @@ Stated here rather than left for a reader to discover. Fuller list in `CORRECTNE
 - **No automatic refund.** A booking that ends charged-but-not-booked reports an explicit
   terminal state carrying the `chargeId`, and flags `requiresIntervention`. The refund
   itself is the assignment's own top nice-to-have and is deferred.
+- **Nothing evicts.** Idempotency records, bookings, and the mock providers' internal maps
+  all grow for the life of the process. A real deployment needs a retention policy for the
+  idempotency records in particular — and a naive TTL would break replay (I5) by evicting a
+  key whose response is still valid to return. The provider maps are a mock's problem and
+  would not exist against a real Stripe.
+- **`requiresIntervention` is derived, not stored.** It is computed from the booking state
+  on every response, so there is exactly one source of truth and the two can never disagree.
+  The cost is that there is no separate "flagged at" timestamp — though `updatedAt` and the
+  `booking.settled` event give the same answer, since the flag is a pure function of a state
+  that only changes once.
+- **`.workflow-data/` is wiped before every integration run.** It is a test fixture
+  directory the tests already write to, but it also holds the history `npx workflow inspect`
+  shows — worth knowing if you were mid-investigation. `npm run clean` does the same by hand.
 
 ## Repository layout
 
