@@ -4,9 +4,8 @@ A small booking service that holds inventory through one mock provider, charges 
 another, and returns a typed response — built on a durable workflow runtime, with an audit
 timeline that explains what happened to any booking.
 
-> **Status: in progress.** The happy path, idempotency, failure modes, and the full
-> four-quadrant state machine work (V1–V4). The timeline endpoint is not built yet — see
-> [Build progress](#build-progress).
+> **Status:** all functionality is built (V1–V5). `PROCESS.md` and the final decision
+> write-up remain — see [Build progress](#build-progress).
 
 ## Quick start
 
@@ -140,6 +139,48 @@ Responses echo `X-Chaos-Applied` with the script that was actually parsed. Malfo
 are ignored rather than rejected, so without the echo "my header did nothing" would be
 indistinguishable from "my header was wrong".
 
+## The audit timeline
+
+`GET /bookings/:id/timeline` answers "what happened to this booking?" without reading a log
+file. The envelope leads with the current state and why, so the 2am question is answered
+before you read a single event; the events show how it got there.
+
+```
+booking.created                {key, fingerprint, offer, amount}
+workflow.started               runId=wrun_01KZPXM60W...
+step.started    holdStep       args=[offer-tl, bkg:bkg_112e5eff:hold]
+step.succeeded  holdStep  13ms -> hold_78411092  status=held
+step.started    chargeStep     args=[12500, GBP, bkg:bkg_112e5eff:charge]
+step.retrying   chargeStep     reason="payment 503"  retryAfter=...
+step.succeeded  chargeStep 1014ms -> ch_8164870e  status=succeeded
+step.started    consumeStep    args=[hold_78411092]
+step.failed     consumeStep 8ms error="hold expired"
+booking.settled                outcome=charged_not_booked
+```
+
+**There is no audit log of our own.** The brief is explicit that a separate audit table is
+the wrong answer, and it is right: a step's persisted input/output already *is* the
+provider-call record. This projects the runtime's event log plus the booking record, and
+adds no storage whose only purpose is audit.
+
+What goes in is a judgement call, and the brief says so — *"pick what's actually useful for
+someone investigating, not everything that ever happened."* So the projection drops about as
+much as it keeps:
+
+| Dropped | Why |
+|---|---|
+| `run_started` | Always follows `run_created`; identical on every booking |
+| `step_started` | One line per attempt, adding nothing the retry and outcome events lack |
+| Stack traces | Ten frames of `node_modules` paths that bury the one line that matters |
+| The chaos script | A mock-only artifact that would not exist in production |
+
+Kept: what was sent, what came back, **which idempotency key was used**, every retry with
+its reason and backoff, how long each step took, and the final state with its cause.
+
+The `durationMs` on a retried step spans the retries — `chargeStep 1014ms` above includes
+the backoff. That is the honest number for "how long did this take", even though it flatters
+nobody.
+
 ## Design documents
 
 The reasoning behind this service lives in two documents written before implementation
@@ -192,12 +233,12 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 | V2 | Idempotency — claim, replay, conflict, concurrency test | ✅ |
 | V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | ✅ |
 | V4 | State machine — all terminal states, the four quadrants | ✅ |
-| V5 | Timeline endpoint | — |
+| V5 | Timeline endpoint | ✅ |
 | V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
 
-**Not built yet.** There is no `GET /bookings/:id/timeline` endpoint (V5), and no automatic
-refund when a booking ends `charged_not_booked` — that is the assignment's own top
-nice-to-have and is deferred (`PLAN.md` A4).
+**Deliberately not built.** No automatic refund when a booking ends `charged_not_booked` —
+that is the assignment's own top nice-to-have and is deferred (`PLAN.md` A4). The state is
+explicit and carries the `chargeId`, which is what M6 requires; the remedy is what is cut.
 
 ### The four-quadrant failure matrix
 

@@ -107,6 +107,19 @@ chaos "charge pending"    "q4" "charge=pending"    "409" "payment_pending"      
 chaos "transient recovers" "q5" "charge=http_5xx,ok" "201" "confirmed"           "false"
 echo
 
+# --- timeline ----------------------------------------------------------------
+send "$RUN_ID-tl" "offer-$RUN_ID-tl" 12500
+TL_ID=$(jget "$BODY" bookingId)
+TL=$(curl -s "$BASE/bookings/$TL_ID/timeline")
+check "timeline booking state" "confirmed" "$(jget "$TL" booking.state)"
+[ -n "$(jget "$TL" runId)" ] && pass "timeline carries runId" || fail "timeline carries runId" "empty"
+EVENT_COUNT=$(printf '%s' "$TL" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).events.length))')
+[ "$EVENT_COUNT" -ge 8 ] && pass "timeline has $EVENT_COUNT events" || fail "timeline event count" "got $EVENT_COUNT, expected >= 8"
+printf '%s' "$TL" | grep -q "node_modules" && fail "timeline leaks stack traces" "found node_modules" || pass "timeline has no stack traces"
+
+TL_STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/bookings/bkg_nope/timeline")
+check "unknown booking timeline returns 404" "404" "$TL_STATUS"
+
 # --- concurrency over real HTTP ---------------------------------------------
 KEY="$RUN_ID-concurrent"
 OFFER="offer-$RUN_ID-concurrent"
