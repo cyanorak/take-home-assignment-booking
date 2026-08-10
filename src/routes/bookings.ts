@@ -5,15 +5,33 @@
  * The async machinery exists underneath — the timeline endpoint is the
  * re-check path — but the caller gets the answer directly.
  *
- * V1 handles the happy path. The L1 idempotency claim, replay, and fingerprint
- * conflict arrive in V2; the failure arms in V4.
+ * Order of operations matters and is not arbitrary:
+ *   1. validate       — before claiming, so a malformed body cannot burn a key
+ *   2. claim          — atomic, before any workflow exists (I4)
+ *   3. create booking — bookingId must exist before any provider call (L2)
+ *   4. start + await  — one run per key
+ *   5. persist        — steps cannot write anything the handler can read
+ *
+ * V2 adds the claim, replay, and conflict. Failure arms arrive in V4.
  */
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { start } from "workflow/api";
 import { bookingWorkflow } from "../workflows/booking.js";
 import { fingerprint, validateBookingRequest } from "../domain/request.js";
 import { applyOutcome, attachRun, createBooking } from "../store/bookings.js";
-import { requiresIntervention, type BookingOutcome } from "../domain/types.js";
+import { claim, settle, type IdempotencyRecord } from "../store/idempotency.js";
+import {
+  requiresIntervention,
+  type BookingOutcome,
+  type BookingRequest,
+} from "../domain/types.js";
+
+/** A fully-formed response, cached so a replay is byte-identical. */
+type BookingResult = {
+  status: ContentfulStatusCode;
+  body: Record<string, unknown>;
+};
 
 export const bookingsRouter = new Hono();
 
@@ -39,33 +57,76 @@ bookingsRouter.post("/bookings", async (c) => {
   const validated = validateBookingRequest(body);
   if (!validated.ok) return c.json({ error: validated.error }, 400);
 
+  const request = validated.value;
+  const claimed = claim<BookingResult>(idempotencyKey, fingerprint(request));
+
+  if (claimed.outcome === "conflict") {
+    // Same key, different request. Replaying the stored response would answer
+    // a question this caller never asked — so refuse instead (I5).
+    return c.json(
+      {
+        error: {
+          code: "idempotency_key_reuse",
+          message: "this Idempotency-Key was used with a different request body",
+        },
+        bookingId: claimed.record.bookingId,
+      },
+      409,
+    );
+  }
+
+  if (claimed.outcome === "claimed") {
+    // Assign the promise in the SAME synchronous turn as the claim: calling an
+    // async function returns its promise immediately, so a concurrent duplicate
+    // is guaranteed to find something to await rather than an empty record.
+    const inflight = runBooking(idempotencyKey, request, claimed.record);
+    claimed.record.inflight = inflight;
+    const result = await inflight;
+    return c.json(result.body, result.status);
+  }
+
+  // Duplicate: return exactly what the winner returned. Never start anything.
+  const existing = claimed.record;
+  const result = existing.result ?? (await existing.inflight!);
+  return c.json(result.body, result.status);
+});
+
+async function runBooking(
+  idempotencyKey: string,
+  request: BookingRequest,
+  record: IdempotencyRecord<BookingResult>,
+): Promise<BookingResult> {
   const booking = createBooking({
-    ...validated.value,
+    ...request,
     idempotencyKey,
-    fingerprint: fingerprint(validated.value),
+    fingerprint: record.fingerprint,
   });
+  record.bookingId = booking.id;
 
   // bookingId is allocated and persisted before any provider call, because L2's
   // keys derive from it and must be stable across replays.
   const run = await start(bookingWorkflow, [
     booking.id,
-    validated.value.offerId,
-    validated.value.amountCents,
-    validated.value.currency,
+    request.offerId,
+    request.amountCents,
+    request.currency,
   ]);
+  record.runId = run.runId;
   attachRun(booking.id, run.runId);
 
   const outcome = (await run.returnValue) as BookingOutcome;
   const settled = applyOutcome(booking.id, outcome);
 
-  return c.json(
-    {
+  const result: BookingResult = {
+    status: 201,
+    body: {
       bookingId: settled.id,
       state: settled.state,
       requiresIntervention: requiresIntervention(settled.state),
       holdId: settled.holdId,
       chargeId: settled.chargeId,
     },
-    201,
-  );
-});
+  };
+  settle(record, result);
+  return result;
+}

@@ -37,9 +37,27 @@ curl -X POST http://localhost:3000/bookings \
 npm test             # unit + integration
 npm run test:unit
 npm run test:integration
+
+./scripts/smoke.sh   # against a running server — see below
 ```
 
 Requires Node ≥ 22. No Docker, no database, no cloud account.
+
+### Why there is a smoke script as well as a test suite
+
+The integration tests drive the Hono app through `app.request()`, which **bypasses Nitro
+entirely**. During V1 that let 12 green tests coexist with a server that returned `500` to
+every request, because `nitro.config.ts` had the wrong handler format. The suite
+structurally cannot catch that class of bug.
+
+`scripts/smoke.sh` runs against a real server over real HTTP — including four concurrent
+requests sharing one `Idempotency-Key` — and doubles as the curl walkthrough. Run it after
+any change to the server wiring:
+
+```bash
+npm run dev            # terminal 1
+./scripts/smoke.sh     # terminal 2
+```
 
 ## Design documents
 
@@ -90,15 +108,26 @@ runs might exist. See `PLAN.md` D1.1/C2.1.
 | | Vertical | Status |
 |---|---|---|
 | V1 | Walking skeleton — happy path end to end | ✅ |
-| V2 | Idempotency — claim, replay, conflict, concurrency test | — |
+| V2 | Idempotency — claim, replay, conflict, concurrency test | ✅ |
 | V3 | Failure modes — retries, `applied_then_lost`, fatal vs retryable | — |
 | V4 | State machine — all terminal states, the four quadrants | — |
 | V5 | Timeline endpoint | — |
 | V6 | Docs — decisions, known gaps, `PROCESS.md` | — |
 
-**What V1 does not do yet.** `Idempotency-Key` is required and stored, but nothing
-deduplicates on it — two identical requests currently produce two bookings. Every provider
-call succeeds, so no failure state is reachable. There is no timeline endpoint.
+**Not built yet.** Every provider call succeeds, so no failure state is reachable —
+`confirmed` is currently the only terminal state a caller can see. There is no timeline
+endpoint.
+
+### Does the concurrency test prove what it claims?
+
+Verified by mutation, not by assumption. Disabling the claim in `src/store/idempotency.ts`
+so every request believes it is the first fails **all six** idempotency tests, including
+the run-count assertion. A test that passes with the feature removed proves nothing.
+
+The run count is asserted as a **delta**, never an absolute: workflow data persists in
+`.workflow-data/` across test invocations, so an absolute count would depend on history.
+Integration test files also run serially (`fileParallelism: false`) — parallel workers
+share that directory, and the run-count assertion flaked until they were serialised.
 
 ## Known limitations
 
@@ -128,7 +157,10 @@ src/
     types.ts            provider contracts and the booking state machine
     keys.ts             L2 idempotency key derivation (frozen by unit test)
     request.ts          validation and request fingerprinting
-  store/bookings.ts     in-memory booking store (handler-side only)
+  store/
+    bookings.ts         in-memory booking store (handler-side only)
+    idempotency.ts      L1 — the atomic claim; the whole of M7 rests on it
+scripts/smoke.sh        end-to-end checks against a running server
 tests/
   *.test.ts             unit tests — no workflow runtime, fast
   *.integration.test.ts integration tests — in-process Local World, no server
