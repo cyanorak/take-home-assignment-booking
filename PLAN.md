@@ -34,17 +34,22 @@ demonstrating correctness reasoning at three boundaries:
 
 Time budget is ~2 hours of build. Cutting scope intelligently is part of the grade.
 
-### 1.1 Standing constraint: dev-easy, production-shaped
+### 1.1 Standing constraint: a single-process service that knows it is one
 
-A clean clone must run in under 5 minutes with no Docker, database, or cloud account —
-**and** no correctness argument may depend on properties that hold only in that local
-configuration. Invariants live behind interfaces whose contract is the distributed one;
-the in-memory implementations are a legitimate degenerate case of that contract, not a
-shortcut around it. Full statement and the rules it generates: `CORRECTNESS.md` §1.
+**Single server, in-memory storage, deliberately.** The assignment scopes this directly —
+persistence "beyond what fits in memory or a JSON file" is out, Postgres is "overkill", and
+the concurrency requirement is qualified with *"no distributed-systems setup needed"*.
+Building for N replicas would be over-building against an explicit instruction.
 
-This constraint has teeth — it is what rules out justifying the idempotency claim by
-"Node is single-threaded" (see D1.1/C1), and what motivates the two-instance concurrency
-test (`CORRECTNESS.md` §4.3, T-conc-2).
+The discipline is narrow: **depending on single-process execution is fine; depending on it
+silently is not.** The assumption gets named in the README, the one seam that would change
+is identified (L1, `CORRECTNESS.md` §1.2), and we build nothing for a deployment we are not
+making.
+
+Worth keeping in view while simplifying: only L1 was ever deployment-dependent, and it
+collapses to a `Map`. **L2 — deterministic provider idempotency keys — was never about
+distribution.** Retries within a single run on a single server can duplicate a side effect,
+and L2 is what prevents that. It does not get simplified.
 
 ### 1.2 The two boundaries that actually carry the grade
 
@@ -84,46 +89,48 @@ constraint, not a suggestion. It is satisfied by projecting WDK's own event/step
 (D1.1/C2) merged with the idempotency and booking records correctness already requires —
 we add no storage whose only purpose is audit.
 
-### 2.1 Core — build this first, and completely
+### 2.1 Core — build this, and nothing else, until it all works
 
-Nothing outside this list may be started until all of it works. In priority order:
+Six items. Anything not on this list is deferred by default, including things that feel
+obviously worth doing.
 
-1. `POST /bookings` with L1 atomic claim + fingerprint replay/conflict (M1, M7)
+1. `POST /bookings` with L1 claim + fingerprint replay/conflict (M1, M7)
 2. The two mock providers with scripted failure modes (M3, M4, M5)
-3. The workflow: hold → charge → consume, deterministic keys per L2 (M2, M6)
-4. Compensation for the charged-but-not-booked quadrant (M6, and see A4)
-5. `GET /bookings/:id/timeline` projecting WDK's log + our records (M8)
-6. The targeted test set (§12 when written; `CORRECTNESS.md` §4.3)
-7. `README.md`, `PROCESS.md` (M9, M10, M11)
+3. The workflow: hold → charge → consume, deterministic keys per L2 (M2)
+4. The booking state machine — every quadrant of M6 reaching a named terminal state with
+   its own typed response arm (M6, §10)
+5. `GET /bookings/:id/timeline` (M8)
+6. T-conc-1, T-deadline-1, and the failure-matrix tests; `README.md`; `PROCESS.md`
+   (M7, M9, M10, M11)
 
-### 2.2 Nice-to-have — do not start until §2.1 is done
+### 2.2 Deferred — do not start until §2.1 is complete
 
-| # | Item | Trigger to build it |
+| # | Item | Note |
 |---|---|---|
-| N1 | Webhook/hook resume for a `pending` charge | Only if A17 lands on "resolve it"; otherwise `pending` is just an explicit state |
-| N2 | Provider-side state in the timeline, reconciled against ours | Cheap (providers are in-process) and high review value, but pure addition |
-| N3 | L3 — losing-run convergence via `hook.getConflict()` | Defence-in-depth behind L1; the reasoning is the deliverable, the code is optional |
-| N4 | Test T-conc-4 — two runs racing into compensation | Requires machinery to force two runs; the L4 CAS itself is core, proving it under race is not |
+| N1 | **Refund** when charged-but-not-booked | The assignment's own top nice-to-have. Core is the explicit terminal state (A4); this is the remedy on top |
+| N2 | Webhook/hook resume for a `pending` charge | Only if A17 lands on "resolve it" |
+| N3 | Provider-side state in the timeline, reconciled against ours | Cheap and high review value, but pure addition |
+| N4 | L3 — losing-run convergence via `hook.getConflict()` | Defence-in-depth behind a working L1; the reasoning is the deliverable, the code is optional |
+| N5 | Test: L1 disabled, prove L2 holds independently | Best evidence that the layering is real, but it proves a design property rather than a requirement |
 
 ### 2.3 Out of scope — from the assignment, do not build
 
 - Authentication, accounts, users. Assume one trusted upstream caller.
 - Real third-party APIs. The mock providers are the only sources of truth.
 - Any UI. curl and tests are the interface.
-- Persistence beyond memory. We do not even use the JSON-file option (D1.1/C3).
+- Persistence beyond memory. In-memory `Map` for idempotency and booking state; the
+  JSON-file option the assignment permits is a trivial swap we do not build by default.
 - Production concerns: deployment, multi-region, rate limiting, secret rotation.
-  **We ship no deploy configuration and no Redis/Postgres implementation.** Naming the
-  primitive each would use is design documentation and costs nothing; building either is
-  out of scope.
+  **No deploy configuration, no Redis/Postgres implementation, no multi-instance tests.**
 - Comprehensive test coverage. A handful of targeted failure-mode and concurrency tests.
 - A "complete" booking system.
 
-**Note on the tension with §1.1.** "Production concerns are out of scope" and "demonstrate
-production thinking" are not in conflict, but the line has to be drawn deliberately:
-*reasoning* about multi-instance correctness is graded (it is the idempotency criterion);
-*building* multi-instance infrastructure is out of scope. So the interfaces are
-production-shaped and documented, the implementations are in-memory, and we ship nothing
-operational.
+**Note on what "idempotency at each layer" means.** The grading criterion asks how
+idempotency was handled "at each layer of the system", and the brief's own framing is
+*"at the API layer, the workflow layer, the step layer, or some combination"*. Those are
+**our** layers, not distributed ones — so the L1–L4 model (`CORRECTNESS.md` §3) is
+answering the question as asked, and it maps onto exactly those layers. It requires no
+more than one process.
 
 ## 3. What the reviewers said they weigh, in their order
 
@@ -155,7 +162,41 @@ Each item: the ambiguity, why it matters, and our default resolution. Items mark
 `OPEN` need the author's call before implementation. IDs are referenced from
 `CORRECTNESS.md`.
 
-### A1 — Is `POST /bookings` synchronous or asynchronous? `OPEN`
+### A1 — Is `POST /bookings` synchronous or asynchronous? `DECIDED — (c), long-poll with a 5s deadline`
+
+**Resolution: the service is asynchronous underneath; the POST long-polls the result as an
+optimisation over that.**
+
+The deciding argument is that the async path must exist regardless — a client can
+disconnect mid-request, so it must be able to re-check, and `GET /bookings/:id/timeline`
+already is that mechanism. Given the async design exists either way, the wait is additive
+rather than architectural, and it costs one `Promise.race`.
+
+Two reasons to spend that:
+
+- **It makes the test suite smaller.** With pure 202, every failure-matrix test becomes
+  `POST → poll until terminal → assert`, i.e. a helper plus a loop through the bulk of the
+  suite. Long-polling puts the outcome in the response, so each test is `POST → assert`.
+  Providers are scripted and in-memory, so runs complete in milliseconds and the deadline
+  essentially never fires except when we make it.
+- **It is where grading criterion #6 lives** — *"whether the typed contract carries the
+  right information out, including in the failure cases"*. If POST always returns `202`,
+  every interesting failure arm migrates to the timeline endpoint and the POST contract
+  becomes trivial.
+
+**Deadline: 5 seconds, and it must be injectable.** Tests set it to ~50ms so the `202` arm
+can be exercised in a fast test (see A9's `slow` outcome and T-deadline-1). 5s rather than
+the 20s first considered: nothing legitimately takes that long here, the timeline holds the
+answer anyway, and a reviewer with curl should not wait 20 seconds to learn we are stuck.
+
+Consequences recorded elsewhere: the duplicate-request join path collapses to three cases
+with no promise map (`CORRECTNESS.md` §3/L1), and `202` becomes a first-class arm of the
+response union rather than a timeout.
+
+The original analysis follows, retained because the trade-off is worth showing in
+`PROCESS.md`.
+
+---
 
 The assignment says the endpoint "takes a booking request, holds inventory …, charges …,
 and returns a typed response", which reads synchronous. But a durable workflow runtime
@@ -194,9 +235,11 @@ The header is client-supplied and the whole correctness story hangs off it. Gene
 one server-side would silently disable idempotency for a careless caller — the exact
 2am bug class this exercise is about.
 
-**Resolution:** the header is **required**. Missing ⇒ `400` with a typed error. Also
-enforce a sane format (length bounds, printable ASCII) so keys cannot be used to
-smuggle control characters into the store or logs. Documented in README.
+**Resolution:** the header is **required**. Missing or empty ⇒ `400` with a typed error.
+
+*Cut: format validation* (length bounds, printable-ASCII checks). There is no untrusted
+caller here — the assignment says to assume one trusted upstream — and the key only ever
+becomes a `Map` key. Input-hardening for a threat model the exercise excludes.
 
 ### A3 — Same key, different request body: replay or reject? `DECIDED`
 
@@ -210,7 +253,7 @@ in-flight run). Same key + different fingerprint ⇒ `409 Conflict`, typed
 `idempotency_key_reuse`. The assignment nudges at this by naming "the original request
 fingerprint" as a timeline entry, which suggests they expect us to have one.
 
-### A4 — Does the four-quadrant matrix require *automatic* compensation? `OPEN` (leaning yes)
+### A4 — Does the four-quadrant matrix require *automatic* compensation? `DECIDED — no`
 
 M6 says the service "must never *silently* leave a customer in an inconsistent state".
 The word "silently" admits two readings:
@@ -218,32 +261,53 @@ The word "silently" admits two readings:
 - **Weak:** it is acceptable to end in `payment_succeeded, inventory_failed` provided the
   state is explicit, typed, surfaced in the response, and visible in the timeline as
   needing action.
-- **Strong:** we must actively compensate — refund the charge, release the hold — and
-  only fall back to an explicit terminal "needs human" state when compensation itself
-  fails.
+- **Strong:** actively compensate — refund the charge, release the hold — falling back to
+  an explicit "needs human" state only when compensation itself fails.
 
-That "refund flow when payment succeeded but inventory failed permanently" is listed as a
-*nice-to-have* is evidence for the weak reading. But it is hard to claim we "handle" the
-charged-but-not-booked quadrant while leaving the customer's money with us.
+**Resolution: the weak reading is core. Refund is deferred to §2.2/N1.**
 
-**Default resolution:** implement the strong reading, because it is the quadrant the
-exercise exists to test — with a hard rule that compensation is itself a workflow step
-with its own retry policy, and its failure produces a distinct terminal state
-(`compensation_failed` / needs-reconciliation) rather than being swallowed. See A5.
+An earlier draft of this plan promoted refund to must-have. That was wrong, and it is worth
+recording *why* it was wrong, because it is the exact error the assignment warns about:
+**"Refund flow when payment succeeded but inventory failed permanently" is listed verbatim
+under "Nice to have (only if you have time)."** Promoting it was over-scoping against an
+explicit instruction, on the reasoning that the quadrant "feels" like the heart of the
+exercise. The brief already told us where it sits.
 
-Runtime note: WDK documents the saga/compensation pattern directly — accumulate rollback
-closures as the workflow progresses, and on failure run them in reverse, with the rollbacks
-themselves declared as steps so they are durable and retried. That is close to free, which
-strengthens the case for the strong reading.
+The weak reading genuinely satisfies M6. Ending in a terminal `charged_not_booked` state
+that names the `chargeId`, returns it in a typed response, and shows the whole causal chain
+in the timeline is *handling* the quadrant — it is explicit, typed, and actionable. What M6
+forbids is silence, not the absence of an automated remedy. A real platform team would
+route this to a reconciliation queue rather than auto-refunding anyway.
 
-### A5 — Is compensation-failed a success or a failure to the caller? `DECIDED`
+What this buys: the state machine loses `compensating` and `compensation_failed`, the
+workflow loses a saga structure and its rollback steps, and the test matrix loses a branch.
+Roughly a third of the remaining build.
 
-If we refund and the refund fails, the customer is charged and not booked, and we know it.
+**One distinction this must not blur.** "Release the hold when payment fails permanently"
+stays **core**; only "refund the charge when inventory fails" is deferred. They are not the
+same act:
 
-**Resolution:** this is a distinct terminal state, not an error to be flattened into
-`500`. The typed response must name it precisely enough that an on-call engineer can act.
-Never return a bare `500` for a state we understand. The timeline must show the intended
-compensation, each attempt, and why it stopped.
+- Releasing a hold returns *inventory* — no money moves, it is one call, it is the natural
+  end of the flow, and without it the not-charged/not-booked quadrant leaves a hold dangling
+  until expiry for no reason.
+- Refunding returns *money*, which is the remedy the assignment classes as nice-to-have.
+
+Runtime note for whoever picks up N1: WDK documents the saga pattern directly — accumulate
+rollback closures as the workflow progresses, run them in reverse on failure, with the
+rollbacks declared as steps so they are durable and retried.
+
+### A5 — How does an inconsistent outcome reach the caller? `DECIDED`
+
+The charged-but-not-booked quadrant is a state we *understand*. It must never be flattened
+into a bare `500`.
+
+**Resolution:** each inconsistent outcome is its own terminal state with its own typed
+response arm, naming the `chargeId` (and `holdId` where relevant) so an on-call engineer
+can act without opening the timeline first. `500` is reserved for states we did not
+anticipate — which, if the state machine (§10) is complete, should be none of them.
+
+This is the whole of M6 under A4's weak reading, and it is why the state machine matters
+more than any compensation machinery would have.
 
 ### A6 — What is `:id` in `GET /bookings/:id/timeline`? `DECIDED`
 
@@ -285,18 +349,29 @@ The assignment calls this out as a design choice it will read for. Requirements 
 two directions: tests need *deterministic, per-call* control; a curl demo needs
 *ambient* control without recompiling.
 
-**Resolution:** two layers, one mechanism.
+**Resolution: one mechanism.** The provider is constructed with an explicit script — an
+ordered list of outcomes per method:
 
-1. **Scripted mode (tests):** the provider is constructed with an explicit script — an
-   ordered list of outcomes per method (`ok`, `http_5xx`, `timeout`, `applied_then_lost`,
-   …). Fully deterministic, no clocks, no randomness, no sleeps. This is what every
-   correctness test uses.
-2. **Ambient mode (manual/demo):** a per-request header (e.g. `X-Chaos: payment=timeout`)
-   or env var seeds the same script for that booking, so a reviewer can reproduce any
-   failure with curl without editing code.
+| Outcome | Behaviour |
+|---|---|
+| `ok` | Normal success |
+| `http_5xx` | Transient server error — retryable |
+| `timeout` | Network-shaped failure, **no** state change at the provider |
+| `applied_then_lost` | Commits state, *then* throws (A10) — the important one |
+| `pending` | Returns `Charge` with `status: 'pending'` (A17) |
+| `slow(ms)` | Succeeds after a delay — the only outcome that sleeps, and it exists solely to drive A1's deadline in T-deadline-1 |
 
-Rejected: probabilistic failure rates as the primary mechanism. Flaky tests are worse
-than no tests, and "1 in 10 requests fails" cannot demonstrate a specific quadrant.
+Deterministic: no clocks, no randomness, and no sleeps other than `slow`, which is explicit
+and only used where a test means it.
+
+A request header (`X-Chaos: payment=timeout`) selects a named script for that booking. This
+is the *same* mechanism with a second entry point, not a second mechanism — it exists
+because the assignment says "curl and tests are how we'll exercise the endpoint", so a
+reviewer needs a way in without editing code. Per A18 the selected script must be passed as
+a **workflow argument**, since a step cannot see request state.
+
+Rejected: probabilistic failure rates. Flaky tests are worse than no tests, and "1 in 10
+requests fails" cannot demonstrate a specific quadrant on demand.
 
 ### A10 — What exactly does "success-but-the-caller-never-saw-the-response" mean? `DECIDED`
 
@@ -335,49 +410,65 @@ Note a discarded earlier idea: incrementing a counter *inside the first step*. S
 retry, so that counter over-counts on any transient failure and would produce a flaky
 test asserting the opposite of what it claims. `world.runs.list()` has no such problem.
 
-### A12 — Which timeline events are worth capturing? `OPEN` (proposal below)
+### A12 — Which timeline events are worth capturing? `DECIDED` (format settled below)
 
 The assignment is explicit that this is a judgement call and that dumping everything is
 the wrong answer: "pick what's actually useful for someone investigating, not everything
 that ever happened."
 
 **Proposal — include:** booking created (with request fingerprint + idempotency key);
-idempotent replay / conflict served; workflow run started; step started/completed with
-duration and terminal-vs-retryable classification; provider call attempts with the
-idempotency key used, the request summary, and the response or error *shape*; each retry
-with its reason and the backoff applied; compensation decisions and their outcome; final
-state with the reason it was reached.
+workflow run started; step started/completed with duration and terminal-vs-retryable
+classification; provider call attempts with the idempotency key used, the request summary,
+and the response or error *shape*; each retry with its reason and the backoff applied;
+final state with the reason it was reached.
 
 **Proposal — exclude:** raw HTTP framing, per-poll noise, successful internal validation
 steps, and anything that would be identical on every booking.
 
-**Source is now settled (D1.1/C2):** events come from `world.events.list({ runId })` and
-`world.steps.list({ runId })` for everything inside a run, merged with our own idempotency
-and booking records for everything outside one (conflicts, replays, takeovers). We write no
-bespoke provider-call log — a step's persisted `input`/`output` already *is* that record.
+**Source is settled and simpler than an earlier draft assumed (D1.1/C2):** the timeline is
+a projection of `world.events.list({ runId })` and `world.steps.list({ runId })`, plus the
+booking record's own fields (idempotency key, fingerprint, created-at, current state,
+terminal reason). We write **no event log of our own** — a step's persisted `input`/`output`
+already *is* the provider-call record, and the booking record already carries the domain
+facts.
 
-Open question is really about *format*: a flat NDJSON event stream is truest to "derived
-from the journal"; a structured envelope (`{booking, currentState, events[], providerView}`)
-is far easier for a human to read at 2am and lets us fold in N3 (provider-side state
-reconciliation). Leaning: envelope, with the events array as the merged projection, and
-`runId` included so a reviewer can corroborate against `npx workflow inspect run <runId>`.
+**Cut: a service-side event stream.** An earlier draft had us emitting our own events for
+things that happen outside a run — replay served, `409` conflict, claim takeover — and
+merging two ordered streams with a `source` discriminator to handle the independent clocks.
+That is a second audit log wearing a disguise, which is what M8 explicitly tells us not to
+build. A `409` never creates a booking, so it has no timeline to appear in; a replay is
+visible from the booking record without an event for it. Dropping it removes the merge, the
+ordering problem, and the discriminator field.
 
-One constraint the merge imposes, worth deciding before writing code — **ordering**: our
-records and WDK's events have independent timestamps and no shared clock guarantee. Sort by
-timestamp, but carry an explicit `source: 'workflow' | 'service'` on every entry so an
-investigator can see which clock produced it rather than being silently misled by
-interleaving. One field, and it is the difference between a timeline someone can trust and
-one that quietly lies about causality.
+**Format `DECIDED` — a minimal envelope.** NDJSON's advantages are streaming and volume; a
+booking has roughly ten events. The envelope answers "what state is this booking in and
+why" in one response, which is the actual 2am question, and it subsumes the status endpoint
+cut in A14.
+
+```json
+{
+  "booking":  { "id", "idempotencyKey", "fingerprint", "state", "reason",
+                "holdId", "chargeId", "createdAt", "updatedAt" },
+  "runId":    "run_...",
+  "events":   [ ... ]
+}
+```
+
+**Cut: a derived `outcome` summary block.** An earlier sketch grouped state/reason/ids into
+a separate top-level object. The booking record already carries every one of those fields —
+re-grouping them builds a second representation to construct and keep in sync, for no
+information gain. Return the record as it is.
+
+`runId` is included so a reviewer can corroborate against `npx workflow inspect run
+<runId>`.
 
 **Cut: redaction.** An earlier draft required redacting payment-instrument data at
-projection time. Re-reading A7, the request carries only `offerId`, `amountCents`, and
-`currency` — there is no card data, token, or PII anywhere in the model, so this was
-machinery for a problem we do not have. Projecting step I/O wholesale is safe here. Noted
-in the README as a thing a real service would need and this one does not.
+projection time. Per A7 the request carries only `offerId`, `amountCents`, and `currency` —
+no card data, token, or PII exists in the model. Machinery for a problem we do not have.
 
-### A13 — What is durable-runtime "step" granularity here? `OPEN` — unblocked, resolve in §8
+### A13 — What is durable-runtime "step" granularity here? `OPEN` — unblocked, resolve in §11
 
-D1 has landed, so this is now writable; it lands in §8 (workflow decomposition), which is
+D1 has landed, so this is now writable; it lands in §11 (workflow decomposition), which is
 grading criterion #2 and therefore not a detail to leave implicit. The rule we will apply:
 
 **A step boundary exists wherever an at-least-once retry would otherwise duplicate a
@@ -392,6 +483,8 @@ Corollaries that constrain §8, all forced by decisions already made:
 - Compensating actions are steps too, with their own retry policy (A4, A16).
 - Pure decisions (validation, choosing whether to compensate) stay in the workflow body,
   which must remain deterministic — no clocks, no randomness, no I/O.
+- Every step is annotated in code with what a retry of it does in the world. Grading
+  criterion #2 is exactly this question, and the annotation is cheap.
 
 ### A14 — Do we need a status endpoint separate from the timeline? `DECIDED`
 
@@ -418,7 +511,53 @@ Tests assert on the *sequence and count of attempts*, never elapsed wall-clock t
 fake the framework's internal clock, which we do not control. Every attempt and its
 classification is recorded in our timeline (A12).
 
-### A16 — The compensating calls take no idempotency key `OPEN` (leaning: extend)
+### A16 — The compensating calls take no idempotency key `DECIDED — leave the interface alone`
+
+**Resolution: do not extend the interface. The given contract is already correct, and the
+mocks enforce why.**
+
+An earlier draft of this entry called the unkeyed calls "the single largest hole in the
+plan" and proposed adding keys to all three. On closer reading the contract is principled,
+and the pattern is consistent:
+
+| Call | Keyed? | Because |
+|---|---|---|
+| `hold(offerId, key)` | ✅ | **Creates** a resource — no natural id exists yet |
+| `charge(amount, currency, key)` | ✅ | **Creates** a resource — the same amount can legitimately be charged twice |
+| `release(holdId)` | ❌ | **Transitions** a named resource: `held → released` |
+| `consume(holdId)` | ❌ | **Transitions** a named resource: `held → consumed` |
+| `refund(chargeId)` | ❌ | **Transitions** a named resource |
+
+Creates need a key because nothing else distinguishes a retry from a second call.
+Transitions do not, because the resource id already does: `consume(hold_abc)` twice is not
+two consumes, it is one consume attempted twice.
+
+The failure I was worried about resolves cleanly. `applied_then_lost` on consume: the hold
+commits to `consumed`, then the call throws; the retry calls `consume(hold_abc)`, finds it
+already consumed, returns success. No key needed. Same for a repeated refund.
+
+**What we build instead — each provider resource gets a small state machine**, so the
+property we depend on is enforced rather than assumed:
+
+- A repeat call on an already-transitioned resource is a **no-op returning success**.
+- An *illegal* transition is a genuine error — `release()` on an already-`consumed` hold
+  must fail, not silently succeed.
+
+This is less code than extending the interface, and it is better signal: it shows we
+worked out why the contract is shaped the way it is rather than "improving" it.
+
+L2's key derivation therefore covers exactly the two creates, which is the whole story:
+
+```
+bkg:${bookingId}:hold     -> inventory.hold
+bkg:${bookingId}:charge   -> payment.charge
+```
+
+Original analysis retained below for `PROCESS.md`.
+
+---
+
+### A16 (original analysis) — the compensating calls take no idempotency key
 
 Caught by re-reading the assignment's own interfaces. The forward calls take a key; the
 compensating and finalising calls do **not**:
@@ -457,7 +596,11 @@ unlike a double charge, is not something the customer will report.
 Whichever way this lands, the **mock providers must model the unkeyed-repeat case
 explicitly**, so a test can prove our behaviour is safe rather than assumed.
 
-### A17 — `Charge.status: 'pending'` is in the given contract and we have no design for it `OPEN`
+### A17 — `Charge.status: 'pending'` is in the given contract `DECIDED — a named terminal state`
+
+**Resolution:** `payment_pending` is a terminal state in §10 that we report honestly and do
+not attempt to resolve. Cheap, satisfies I7, and it is the only state in the machine that
+would become non-terminal if N2 (webhook resume) were ever built. Analysis retained below.
 
 The assignment's `Charge` type admits `'succeeded' | 'failed' | 'pending'`. Our design so
 far treats a charge as binary. A `pending` charge is a genuinely distinct state: the money
@@ -473,16 +616,15 @@ Options:
 - **Treat `pending` as terminal-unknown.** Booking rests in an explicit non-terminal state,
   response says so (A1's `pending` arm carries it naturally), timeline shows why. Cheapest,
   honest.
-- **Wait for resolution via a hook/webhook** — this is exactly what N1 is for, and it turns
+- **Wait for resolution via a hook/webhook** — this is exactly what N2 is for, and it turns
   the nice-to-have into the natural answer for a state the contract already forces on us.
   `createWebhook` + provider callback resumes the run.
 - **Poll with `sleep()`** inside the workflow until it resolves or a budget expires. Durable
   and simple; less elegant than a webhook but far cheaper to build.
 
-**Leaning:** treat `pending` as an explicit non-terminal state now — cheap, satisfies I7,
-and it is the *core* answer. N1's webhook resume is the stretch, and only earns its place
-if §2.1 is finished. The point stands that it would stop being a bolt-on demo and become
-the answer to a state the provider contract already contains. Decide alongside A4 and D3.
+**Leaning: the first.** Treat `pending` as a named state that the response and timeline
+report honestly — cheap, satisfies I7, and it is the *core* answer. N2's webhook resume is
+the stretch and only earns its place if §2.1 is finished. Decide alongside D3.
 
 ### A18 — Steps are isolated routes, so request-scoped state cannot reach them `OPEN` — verify in spike
 
@@ -569,13 +711,13 @@ a single atomic conditional write on the `Idempotency-Key` — a unique constrai
 lock. The loser awaits the winner's outcome rather than starting anything. WDK's
 hook-conflict pattern is then a second line of defence, which is the role it suits.
 
-**This must not be justified by Node being single-threaded.** The in-memory implementation
-is correct for a single-instance deployment (which Local World is), but the *design* is an
-atomic CAS against a shared store, implementable as `SET NX` / `INSERT … ON CONFLICT DO
-NOTHING` / conditional `PutItem` without changing a line of calling code. The full layered
-argument — including what still holds when this layer fails, and the claim/start crash
-window — is `CORRECTNESS.md` §3. That layering is a primary deliverable of the design, not
-an implementation detail.
+Implementation is a `Map`, and Node's event loop is what makes it atomic — **which is a
+fine thing to depend on and a bad thing to leave unsaid.** The claim must contain no
+`await` between check and insert; that is the whole correctness argument, and it gets a
+comment saying so. The seam that would change for more than one server is one line
+(`CORRECTNESS.md` §1.2). The full layered argument — including what still holds when this
+layer fails — is `CORRECTNESS.md` §3, and that layering is a primary deliverable of the
+design, not an implementation detail.
 
 A second reason we cannot lean on hooks for this: hook tokens are only unique *while
 active*, and are released when the run completes. Idempotent replay (A3) must work after
@@ -668,64 +810,66 @@ resume, no restart tests. That work is the runtime's, and reimplementing it loca
 be precisely the hand-rolled durability we rejected in D1 — with the added flaw of testing
 a mechanism that never runs in production.
 
-What we owe in exchange is precision about which layer owns which guarantee, stated in the
-README rather than left implicit:
+What we owe in exchange is one honest line in the README: **in-flight runs do not survive a
+restart, because the Local World queues steps in memory; the Vercel and Postgres Worlds
+provide resumption, and switching is an environment variable.** We name the property rather
+than claim it.
 
-| Property | Owner | Local | Vercel/Postgres World |
-|---|---|---|---|
-| Step results persisted, no re-execution on replay | Runtime | ✅ | ✅ |
-| At-least-once step execution | Runtime | ✅ | ✅ |
-| Interrupted runs resume after crash/restart | **World** | ❌ | ✅ |
-| Idempotency claim survives restart | **Our store impl** | ❌ (in-memory) | ✅ (Redis/PG) |
-| No double charge / double hold | **Our design (L2)** | ✅ | ✅ |
+This costs no correctness. I1/I2 (no double charge, no double hold) rest on L2, which
+depends on nothing above it — not the store, not the World, not the process count
+(`CORRECTNESS.md` §4.5). So: A8 is closed.
 
-The last row is the one that matters: **L2 does not depend on any of the rows above it.**
-Deterministic provider keys hold under crash, restart, replay, and duplicate runs alike,
-in every World. That is why it is the floor (`CORRECTNESS.md` §3.2), and why losing
-local persistence costs us nothing in correctness.
+### D2 — HTTP framework and test runner `DECIDED — Hono + Vitest`
 
-So: A8 is closed. We neither build nor claim restart recovery, and the README states which
-World would provide it instead of implying we would.
+TypeScript is given, and WDK requires a framework integration, which rules out bare
+`node:http`. Both Hono and Express are supported.
 
-### D2 — HTTP framework and test runner `OPEN` (narrowed)
+**Hono**, for one concrete reason: `app.request()` drives the app in-process without
+binding a port. Every test in this suite is an HTTP test, and the concurrency test issues
+two simultaneous requests — doing that against a real socket adds a server lifecycle, port
+allocation, and a class of flakiness that has nothing to do with what we are testing.
+Express would need `supertest` or a live listener for the same coverage. Reversible in
+~20 lines if the spike says otherwise.
 
-TypeScript is given. WDK requires a framework integration, which rules out bare
-`node:http`. Shortlist: **Hono** (smallest, fast, first-class WDK integration, trivial to
-drive in tests via `app.request()`) or **Express** (most familiar to a reviewer). Bias:
-Hono, for testability without binding a port.
+**Vitest**, for async ergonomics and concurrent-test control.
 
-Test runner: **Vitest**, for async ergonomics, fake timers, and concurrent-test control.
-Confirm WDK's build plugin composes with the chosen runner early — steps are compiled into
-isolated routes by a bundler plugin, and the testing story was not documented in the
-material we could reach. **This is the single biggest schedule risk in the plan; spike it
-in the first 15 minutes** (see §11 when written) before building anything on top.
+**Remaining risk, unchanged:** WDK compiles steps into isolated routes via a bundler
+plugin, and its testing story was not documented in the material we could reach. **Spike
+this first** — it is the one item that can invalidate design rather than merely cost time.
+Questions in §11.
 
-### D3 — Resolution of A1, A4, A12, A16, A17 `OPEN`
+### D3 — Remaining open decisions `NONE`
 
-Defaults proposed above. Confirm or override before implementation starts.
-(A8 closed by D1.1/C3. A18 is spike-blocking rather than author-blocking.)
+All author decisions are closed: A1, A4, A8, A12, A16, A17, D1, D2.
 
-Summary of what is still open, and what each blocks:
+A18 remains, but it is **spike-blocking rather than author-blocking** — it is a question
+about how WDK behaves, answered by running code (§11), not by a judgement call.
 
-| Item | Decision | Blocks |
-|---|---|---|
-| A1 | Sync / sync-with-deadline / async | §9 response contract, every test's shape |
-| A4 | Auto-compensate vs explicit terminal state | §8 decomposition, N1 scope |
-| A12 | Timeline format: NDJSON vs envelope | §10 schema |
-| A16 | Extend provider interface with keys, or rely on resource identity | §8, provider mocks |
-| A17 | How `pending` charges resolve — and whether that promotes N2 | §8, N2 scope |
-| D2 | Hono vs Express; Vitest | Everything (spike first) |
+Implementation may begin with the spike.
 
-## 6. To be written once D2/D3 land
+## 6. Still to be written
 
-- §7 Architecture and module layout
-- §8 Workflow decomposition: each step, its side effect, its retry semantics, its
-  idempotency key derivation (A13 gives the rule; §8 applies it)
-- §9 API contracts: request/response types including every failure arm
-- §10 Timeline event schema
-- §11 Build sequence in increments, each leaving the service runnable
-- §12 Test plan (cross-referenced to `CORRECTNESS.md` §7)
-- §13 Deliberate cuts and known limitations
+- **§10 Booking state machine** — ✅ **written**. Was the largest gap; unblocked by A4.
+- **§11 Spike + workflow decomposition** — each step, its side effect, its retry semantics,
+  its idempotency key derivation (A13 gives the rule; §11 applies it). Grading criterion #2.
+  Opens with the spike question list, since two of them can change the decomposition.
+- **§12 API contracts** — request schema and the response union, one arm per §10 state.
+- **§13 Timeline envelope schema.** Blocked on A12 (cheap answer: envelope).
+- **§14 Build sequence in increments**, each leaving the service runnable.
+- **`CORRECTNESS.md` §5/§6/§7** — happy path, failure taxonomy, test matrix. §10 supplies
+  the terminal states these map onto, so this is now mechanical.
+
+Still undecided and not written anywhere, all small, none to be discovered while coding:
+
+- Whether validation happens **before or after** the L1 claim. Validate-first means a
+  malformed body does not burn the key; it also means a rejected request's fingerprint is
+  never stored, so a corrected retry under the same key succeeds rather than `409`s. That
+  is probably right, but it is a decision.
+- Whether the idempotency record and the booking record are **one store or two**. They
+  overlap heavily; §10.5 argues their *lifecycles* are separate, which is not the same
+  question as whether they share a `Map`.
+- L2 key derivation is specified for `hold`/`charge`/`refund` but not `consume`/`release`
+  — closed by A16 either way, but the table needs the two extra rows.
 
 ## 7. Deliberate cuts
 
@@ -738,8 +882,13 @@ as judgment if it is visible.
 | **Claim/start crash-window takeover** (`CORRECTNESS.md` §3.1) | The mechanism needs a state machine, a takeover threshold, and a CAS — and the failure it fixes **cannot be demonstrated locally at all**, because an in-memory store is wiped by the very restart that would trigger it. Keep the analysis, cut the code. | ✅ |
 | **Hold expiry** (`expiresAt` is in the given `Hold` type) | A real quadrant, and it interacts with A1(c) — if we return `pending`, the hold can expire underneath us. But it needs timers and a whole extra failure branch. The type contract raises the question, so silence would read as oversight rather than choice. | ✅ |
 | **Timeline redaction** | Solves a problem this model does not have: the request carries only `offerId`, `amountCents`, `currency`. No card data, tokens, or PII exist to redact. | ✅ |
+| **Automatic refund / compensation (A4)** | The assignment lists it verbatim under "Nice to have (only if you have time)". An explicit terminal state naming the `chargeId` satisfies M6's "never *silently*". Promoting it was over-scoping against an explicit instruction — deferred to §2.2/N1. | ✅ |
+| **CAS on state transitions** | Guarded a race that cannot occur once L1 works, L3 is deferred, and the workflow body is replayed deterministically. Kept the state machine, dropped the concurrency ceremony. | — |
+| **A service-side event log for the timeline** | A second audit log wearing a disguise — precisely what M8 says not to build. WDK's step/event log plus the booking record's fields cover it, and dropping it removes the two-stream merge and its clock-ordering problem. | — |
+| **Idempotency-key format validation** | One trusted upstream caller is assumed; the key only becomes a `Map` key. Hardening for an excluded threat model. | — |
 | **Restart recovery / persistent local storage** | Property of the World, not our code (D1.1/C3). Reimplementing it locally would be the hand-rolled durability rejected in D1, testing a mechanism production never runs. | ✅ |
-| **Redis/Postgres store implementations** | Out of scope per §2.3. The interface contract and the named primitive carry the design argument; the code would carry no additional signal. | ✅ |
+| **Multi-instance support and its tests** | The assignment says "no distributed-systems setup needed" and rules out Postgres. Single-process is the scoped answer; §1.1 requires only that we say so rather than rely on it silently. | ✅ |
+| **Redis/Postgres store implementations** | Follows from the above. One sentence naming the primitive (`SET NX`) carries the whole design argument; the code would carry no additional signal. | ✅ |
 | **Idempotency record retention/expiry** | Production concern, explicitly out of scope. Worth one line, since a naive TTL would silently break I5. | ✅ |
 | **Status endpoint separate from the timeline** (A14) | The timeline already returns current state. Surface area without new information. | — |
 | **Metrics / structured logging** beyond the journal projection | The timeline *is* the observability deliverable. | — |
@@ -787,3 +936,91 @@ decision with a real reversal or departure, which is what the brief asks for:
 - If the build exceeds two hours, record where the time went — the assignment asks for
   this explicitly and honesty scores better than a quiet overrun. Note that planning time
   is already substantial; count it and say so.
+
+## 10. Booking state machine `DECIDED`
+
+The definition of M6. Every quadrant of (charged | not) × (booked | not) is a **named
+reachable state with its own response arm**, so "handles the matrix" is testable rather than
+asserted. Referenced by `CORRECTNESS.md` §3/L4.
+
+### 10.1 Ordering, and the quadrant it eliminates
+
+**hold → charge → consume.** Inventory is the scarce resource and releasing a hold is
+cheaper and safer than moving money, so the reversible commitment goes first.
+
+The consequence is worth stating in the README: **we only consume after a successful
+charge, so "booked but not charged" is unreachable by construction.** One of M6's four
+quadrants is closed by the ordering rather than by handling it. Charging first would have
+put money at risk instead of inventory — strictly worse for the same effort.
+
+"Booked" means the hold reached `consumed`. A hold alone is a reservation, not a booking.
+
+### 10.2 States
+
+| | State | Meaning | HTTP |
+|---|---|---|---|
+| in-flight | `pending` | Claimed, run started, no provider call settled yet | `202` |
+| | `held` | Inventory held, not yet charged | `202` |
+| | `charged` | Charged, not yet consumed | `202` |
+| terminal ✅ | `confirmed` | Charged and consumed. The happy path | `200` |
+| terminal ❌ | `inventory_unavailable` | Hold failed. Nothing held, nothing charged | `409` |
+| terminal ❌ | `payment_failed` | Charge failed permanently; hold released | `402` |
+| terminal ⚠️ | `charged_not_booked` | **The quadrant.** Charge succeeded, consume failed permanently | `200` + explicit state |
+| terminal ⚠️ | `payment_pending` | Charge returned `'pending'` (A17); outcome not yet knowable | `200` + explicit state |
+
+The in-flight states return `202` only because the A1 deadline expired — they are what a
+long-poll gives up on, not a separate contract.
+
+`charged_not_booked` and `payment_pending` return `200`, not `5xx`. They are outcomes we
+understand and report precisely, per A5 and I7. A `5xx` would say "something went wrong we
+cannot describe", which is false and would lose the information the caller needs.
+
+### 10.3 Transitions
+
+```
+pending ──hold ok──> held ──charge ok──> charged ──consume ok──> confirmed
+   │                  │                     │
+   │ hold fails       │ charge fails        │ consume fails
+   │ (permanent)      │ (permanent)         │ (permanent)
+   ▼                  ▼  [release hold]     ▼
+inventory_          payment_failed      charged_not_booked
+unavailable
+                    charge -> 'pending'
+                            ▼
+                     payment_pending
+```
+
+Legal transitions, and nothing else:
+
+| From | To | On |
+|---|---|---|
+| `pending` | `held` | `hold()` succeeded |
+| `pending` | `inventory_unavailable` | `hold()` failed permanently |
+| `held` | `charged` | `charge()` returned `succeeded` |
+| `held` | `payment_pending` | `charge()` returned `pending` |
+| `held` | `payment_failed` | `charge()` failed permanently — **release the hold first** |
+| `charged` | `confirmed` | `consume()` succeeded |
+| `charged` | `charged_not_booked` | `consume()` failed permanently |
+
+Terminal states have no outgoing transitions. An attempted illegal transition throws — a
+bug, not a runtime condition.
+
+### 10.4 Two sub-decisions, and why they went the way they did
+
+**A failed hold-release does not get its own state.** If `charge()` fails permanently and
+`release()` also fails, a hold dangles. It still resolves to `payment_failed`: no money is
+involved, holds carry `expiresAt` and expire on their own, and the timeline shows the failed
+release attempt. A state for it would add a branch that buys nothing.
+
+**`payment_pending` is terminal — for now.** Under A17's cheap answer we report the
+uncertainty honestly rather than resolving it. If N2 (webhook resume) is ever built it
+becomes non-terminal, with `payment_pending → charged | payment_failed`. That is the only
+transition the design would need to grow.
+
+### 10.5 Relationship to the idempotency record
+
+The idempotency record's own lifecycle (`claimed → running → terminal`, `CORRECTNESS.md`
+§3/L1) is **separate and deliberately so**. It tracks *our execution*; the booking state
+tracks *the world*. They fail independently — the asymmetry §2 of `CORRECTNESS.md` exists to
+protect. A booking can be `confirmed` while the idempotency record is still being written;
+the record stores the terminal response once known, for replay under I5.
