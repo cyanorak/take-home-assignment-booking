@@ -1133,12 +1133,41 @@ retry would otherwise duplicate a real-world side effect.**
 | | Where | Why |
 |---|---|---|
 | Validation, fingerprinting, L1 claim, `bookingId` allocation | **Before the workflow**, in the request handler | They must happen before `start()`, and their results become workflow arguments. Also they can reject without creating a run |
-| Choosing *which* step runs next, and whether to release | **Workflow body** | Pure control flow over step results. Must stay deterministic — no clocks, no randomness, no I/O |
+| Choosing *which* step runs next, and computing the resulting state | **Workflow body** | Pure control flow over step results. Deterministic — no clocks, no randomness, no I/O |
 | `hold`, `charge`, `consume`, `release` | **One step each** | Each is exactly one real-world side effect |
-| Persisting the resulting booking state | **Inside the step that caused it** | The workflow body cannot do I/O, and this keeps the state write adjacent to the call that justified it (`CORRECTNESS.md` §4.4) |
+| Persisting the booking record | **The handler, after `await run.returnValue`** | Steps cannot write anything the handler can read — see below |
 
 **One provider call per step, never two.** Two side effects in one step means a retry after
 a partial failure re-runs the first — the exact bug this exercise is built around.
+
+#### Why the handler persists, not the step — VERIFIED, not assumed
+
+Two earlier drafts of this section were wrong in opposite directions: the first left
+persistence unspecified, the second put it inside the step. The V1 probe settled it by
+measurement (`tests/probe.integration.test.ts`, Q3):
+
+> **Steps execute in a separate module instance.** A counter incremented inside a step read
+> back as `2` step-side and `0` caller-side, and module state written by the HTTP handler
+> read as `null` inside the step. Writes do not cross in **either** direction.
+
+So a step writing to the booking `Map` writes to a copy the handler and the timeline
+endpoint can never read. The shape that works:
+
+1. Steps are **pure provider wrappers** — they take what they need as arguments and return
+   the provider's result. No booking id, no store access.
+2. The **workflow body** computes the resulting state from step results and returns the
+   terminal record: `{ state, holdId, chargeId, reason, holdReleased }`.
+3. The **handler** awaits `run.returnValue` and writes the booking record.
+
+This is simpler than the alternative and costs nothing observable: §10.2 already
+establishes that in-flight states have no HTTP mapping under a fully synchronous A1, so no
+caller ever sees `held` or `charged` — and WDK's step log still records them for the
+timeline.
+
+The one consequence to accept: if a run fails catastrophically, the booking record stays
+`pending` rather than showing how far it got. The timeline still shows every step that ran,
+so nothing is lost for diagnosis. Same class as the restart gap in `CORRECTNESS.md` §4.5,
+now with a second cause.
 
 ### 11.2 The steps
 
@@ -1147,20 +1176,50 @@ world?"*, because that is the question being graded.
 
 | Step | Signature | Retry does what, in the world | `maxRetries` | Fatal when |
 |---|---|---|---|---|
-| `holdStep` | `(bookingId, offerId, idemKey) → Hold` | Returns the **same** hold — the key makes it a read-repair | 3 | Offer unknown / sold out |
-| `chargeStep` | `(bookingId, amountCents, currency, idemKey) → Charge` | Returns the **same** charge. This is the one that must never duplicate | 3 | Card declined |
-| `consumeStep` | `(bookingId, holdId) → void` | No-op; the hold is already `consumed` (A16 — resource identity) | 5 | Hold expired |
-| `releaseStep` | `(bookingId, holdId) → void` | No-op; the hold is already `released` | 2 | Hold already `consumed` |
+| `holdStep` | `(offerId, idemKey) → Hold` | Returns the **same** hold — the key makes it a read-repair | 3 | Offer unknown / sold out |
+| `chargeStep` | `(amountCents, currency, idemKey) → Charge` | Returns the **same** charge. This is the one that must never duplicate | 3 | Card declined |
+| `consumeStep` | `(holdId) → void` | No-op; the hold is already `consumed` (A16 — resource identity) | 5 | Hold expired |
+| `releaseStep` | `(holdId) → void` | No-op; the hold is already `released` | 2 | Hold already `consumed` |
 
-**Why every step takes `bookingId`.** The step is what persists the resulting state
-transition, so it needs to know which booking. An earlier draft had pure provider wrappers
-without it, which contradicted §11.1 — the workflow body cannot write state (it must stay
-deterministic and I/O-free), so the step must.
+Pure provider wrappers, per the finding above — no `bookingId`, no store access. Everything
+a step needs arrives as an argument, which is also what A18 requires, and it makes the
+persisted step `input`/`output` exactly the provider call (D1.1/C2), which is what lets the
+timeline project it without a bespoke log.
 
-Writing booking state inside the step does **not** violate "one side effect per step". A
-`Map` write is local, not a real-world effect, and it is idempotent by construction —
-setting `state = 'held'` twice is indistinguishable from once. Only the provider call is a
-real side effect, and there is still exactly one per step.
+#### Mock provider state — VERIFIED across step routes
+
+Steps compile into isolated routes, so "all steps are step-side" does not by itself imply
+they share one module instance. Probed rather than assumed
+(`tests/probe-providers.integration.test.ts`):
+
+| | Checked | Result |
+|---|---|---|
+| P1 | `holdStep` creates a hold | ✅ |
+| P2 | `consumeStep` reads and consumes **that exact hold** | ✅ |
+| P3 | `releaseStep` reads a hold created by `holdStep` | ✅ |
+| P4 | A retried step sees the provider's prior idempotency record | ✅ |
+| P5 | Charge state survives separate charge-step invocations | ✅ |
+
+`distinct step module instances: 1`. **All step routes share one module instance.** So the
+mock providers can hold state in module-level `Map`s with no shared backing — provided
+every provider access happens inside a step. That proviso is the design already
+(§11.1), so nothing changes.
+
+P4 is worth calling out: the step committed a charge and *then* threw, WDK retried it, and
+the retry found the committed record via the same idempotency key rather than charging
+again. That is I1 — the exercise's central case — demonstrated against the real runtime
+before any booking code exists.
+
+**Two consequences for later work:**
+
+- **Provider state is invisible to the handler.** N3 (provider-side state in the timeline)
+  would need a step to read it, not a direct call from the timeline endpoint. Worth knowing
+  before starting N3, since it is no longer quite as cheap as §2.2 implies.
+- **Provider state does not reset between tests in a file.** The vitest plugin clears
+  *workflow* data per file, but module state accumulates — the probe ended with 12 holds
+  after 6 runs. Tests must therefore use **distinct idempotency keys and offer ids per
+  test**, which the probe does via a `runKey` prefix. This is more realistic than a reset
+  hook anyway, and it avoids adding a test-only step whose sole job is clearing state.
 
 Notes on the numbers, which are judgement rather than convention:
 

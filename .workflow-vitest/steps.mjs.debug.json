@@ -1,9 +1,11 @@
 {
   "stepFiles": [
     "/home/user/src/take-home-assignment-booking/node_modules/workflow/dist/stdlib.js",
+    "/home/user/src/take-home-assignment-booking/src/probe-providers.ts",
     "/home/user/src/take-home-assignment-booking/src/probe.ts"
   ],
   "workflowFiles": [
+    "/home/user/src/take-home-assignment-booking/src/probe-providers.ts",
     "/home/user/src/take-home-assignment-booking/src/probe.ts"
   ],
   "serdeOnlyFiles": [

@@ -392,6 +392,12 @@ The remaining suite is the failure taxonomy (§6) driven through scripted provid
 four quadrants, `applied_then_lost`, timeout, transient 5xx with retry, replay, and the
 fingerprint conflict.
 
+**Test isolation rule, from the V1 probe.** The Vitest plugin clears *workflow* data
+between test files, but the mock providers' module-level state accumulates across tests
+within a file. Every test must therefore use **distinct idempotency keys and offer ids** —
+derive them from the test name. This is closer to how a real provider behaves than a reset
+hook would be, and it avoids a test-only step whose only job is clearing state.
+
 ### 4.4 Ordering constraint derived from the above
 
 Because there is no cross-store atomicity (§4.2), the sequence around every provider call
@@ -484,8 +490,8 @@ The sequence every failure in §6 is a deviation from. States are `PLAN.md` §10
 | 8 | Workflow | `chargeStep(amountCents, currency, "bkg:{id}:charge")` → `Charge{succeeded}` | I1, I6 |
 | 9 | Workflow | `held → charged` | — |
 | 10 | Workflow | `consumeStep(holdId)` | I6 |
-| 11 | Workflow | `charged → confirmed` | — |
-| 12 | Handler | `await run.returnValue`; store the terminal response on the record | I5 |
+| 11 | Workflow | Return `{ state: "confirmed", holdId, chargeId }` | — |
+| 12 | Handler | `await run.returnValue`; **write the booking record**; store the terminal response for replay | I5 |
 | 13 | Handler | **`201`** `{ bookingId, state: "confirmed", holdId, chargeId }` | I7 |
 
 Three things about this sequence are load-bearing rather than incidental:
@@ -498,8 +504,10 @@ Three things about this sequence are load-bearing rather than incidental:
 - **Step 4 precedes step 6** because L2's keys derive from `bookingId`. Allocating the id
   inside the workflow would make the keys depend on execution identity — the mistake §3/L2
   exists to prevent.
-- **Step 12 stores the response.** Without it, I5's replay has nothing to replay, and a
-  duplicate arriving after completion would have to re-derive the answer.
+- **Step 12 is where all persistence happens**, and it is in the handler, not the steps.
+  Steps run in a separate module instance and cannot write anything the handler or the
+  timeline can read — verified by probe, see `PLAN.md` §11.1. Without step 12 there is also
+  nothing for I5 to replay.
 
 ## 6. Failure taxonomy
 
