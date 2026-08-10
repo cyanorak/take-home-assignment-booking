@@ -1123,6 +1123,10 @@ the record stores the terminal response once known, for replay under I5.
 with the booking holding `idempotencyKey` and the record holding `bookingId`. Two maps
 because they have two key spaces and two lifecycles, not because they need isolating.
 
+The booking record also carries **`runId`**, written by the handler once `start()` resolves.
+The timeline endpoint has only a `bookingId` to work from, so without it there is nothing to
+pass to `world.events.list({ runId })`.
+
 ## 11. Workflow decomposition `DECIDED` (closes A13)
 
 Grading criterion #2. The rule from A13: **a step boundary exists wherever an at-least-once
@@ -1234,7 +1238,35 @@ Notes on the numbers, which are judgement rather than convention:
   distinction criterion #2 is asking about, and it is why the classification lives in the
   step rather than in a shared retry policy.
 
-### 11.3 Idempotency keys
+### 11.3 The workflow returns failures; it does not throw them
+
+**Rule: the workflow body catches every *modelled* failure and returns a terminal record.
+Only genuinely unexpected errors are allowed to propagate.**
+
+This is what makes the rest of the contract work. When a step exhausts its retries or
+throws `FatalError`, WDK surfaces the error into the workflow body. If the body lets it
+propagate, `run.returnValue` **rejects** — and the handler awaiting it cannot tell
+`payment_failed` (a modelled outcome with a `402` and a typed body) from a bug in our own
+code. Every failure arm of §12.1 would collapse into one opaque `500`.
+
+So the body is shaped:
+
+```ts
+try   { charge... }                        // step throws after retries are exhausted
+catch { return { state: "payment_failed",  // modelled: return, never rethrow
+                 reason: describe(err),
+                 holdReleased: await releaseStep(holdId) } }
+```
+
+Two consequences worth stating:
+
+- **`reason` is built here**, in the workflow body, from the error the step surfaced. It is
+  the only place that has both the error and the context to describe it.
+- **`CORRECTNESS.md` §6.3's "the only `500` in the API" is true only because of this
+  rule.** A rejected `returnValue` means something we did not model went wrong, which is
+  exactly what a `500` should mean.
+
+### 11.4 Idempotency keys
 
 Per A16, only the two creates take keys:
 
@@ -1247,7 +1279,7 @@ Derived by one pure function of `(bookingId, literal step name)` with no access 
 or step metadata, unit-tested against a frozen table (`CORRECTNESS.md` §3/L2). `consume` and
 `release` are keyed by `holdId`, which is the resource itself.
 
-### 11.4 Validation before or after the claim
+### 11.5 Validation before or after the claim
 
 **Validate first, then claim.** A malformed body should not burn an idempotency key —
 otherwise a client that fixes its payload and retries with the same key gets a permanent

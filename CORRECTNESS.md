@@ -398,6 +398,11 @@ within a file. Every test must therefore use **distinct idempotency keys and off
 derive them from the test name. This is closer to how a real provider behaves than a reset
 hook would be, and it avoids a test-only step whose only job is clearing state.
 
+**Expected suite speed, so nobody "optimises" it later.** Each workflow run costs roughly a
+second regardless of how trivial it is — the probe's 11 tests took 17s, and a 7-step
+workflow took ~2s against ~1s for a 1-step one. That floor is the runtime's queue dispatch,
+not our code. A ~15-test suite landing around 30–45s is expected and fine.
+
 ### 4.4 Ordering constraint derived from the above
 
 Because there is no cross-store atomicity (§4.2), the sequence around every provider call
