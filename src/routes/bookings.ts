@@ -12,7 +12,7 @@
  *   4. start + await  — one run per key
  *   5. persist        — steps cannot write anything the handler can read
  *
- * V2 adds the claim, replay, and conflict. Failure arms arrive in V4.
+ * Every terminal state has an arm here; nothing falls through to a 5xx.
  */
 import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";

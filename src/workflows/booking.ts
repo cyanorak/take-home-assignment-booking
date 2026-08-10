@@ -11,11 +11,10 @@
  * a separate module instance from the HTTP handler and cannot write anything it
  * can read, so the workflow *returns* the outcome and the handler persists it.
  *
- * V3 adds failure modes and retry classification. Terminal failure states —
- * catching exhausted retries and returning a record rather than throwing
- * (§11.3) — arrive with V4.
+ * Modelled failures are caught and returned as terminal records rather than
+ * thrown (§11.3) — see the note on bookingWorkflow below for why.
  */
-import { FatalError, RetryableError } from "workflow";
+import { FatalError, getStepMetadata, RetryableError } from "workflow";
 import { inventoryProvider } from "../providers/inventory.js";
 import { paymentProvider } from "../providers/payment.js";
 import { ProviderPermanentError, type ChaosScript } from "../providers/chaos.js";
@@ -31,14 +30,19 @@ import type { BookingOutcome, Charge, Hold } from "../domain/types.js";
  * provider said no" — but retrying one is diligence and retrying the other is
  * just noise with a side effect budget.
  */
-function classify(error: unknown, attempt: number): never {
+function classify(error: unknown): never {
   if (error instanceof ProviderPermanentError) {
     // Retrying changes nothing in the world. Stop immediately.
     throw new FatalError(error.message);
   }
-  // Transient: back off quadratically using the attempt WDK gives us.
+
+  // Transient: back off quadratically. The attempt number comes from the
+  // runtime — an earlier version took it as a step parameter defaulting to 1,
+  // which the workflow had no way to supply, so every backoff was identical
+  // and the escalation existed only in the comment.
+  const { attempt } = getStepMetadata();
   throw new RetryableError(error instanceof Error ? error.message : String(error), {
-    retryAfter: Math.min(attempt ** 2 * 50, 500),
+    retryAfter: Math.min((attempt + 1) ** 2 * 50, 2_000),
   });
 }
 
@@ -55,13 +59,12 @@ export async function holdStep(
   offerId: string,
   idempotencyKey: string,
   script: ChaosScript,
-  attempt = 1,
 ): Promise<Hold> {
   "use step";
   try {
     return await inventoryProvider.hold(offerId, idempotencyKey, script.hold);
   } catch (error) {
-    classify(error, attempt);
+    classify(error);
   }
 }
 holdStep.maxRetries = 3;
@@ -76,13 +79,12 @@ export async function chargeStep(
   currency: string,
   idempotencyKey: string,
   script: ChaosScript,
-  attempt = 1,
 ): Promise<Charge> {
   "use step";
   try {
     return await paymentProvider.charge(amountCents, currency, idempotencyKey, script.charge);
   } catch (error) {
-    classify(error, attempt);
+    classify(error);
   }
 }
 chargeStep.maxRetries = 3;
@@ -100,13 +102,12 @@ chargeStep.maxRetries = 3;
 export async function consumeStep(
   holdId: string,
   script: ChaosScript,
-  attempt = 1,
 ): Promise<void> {
   "use step";
   try {
     await inventoryProvider.consume(holdId, script.consume);
   } catch (error) {
-    classify(error, attempt);
+    classify(error);
   }
 }
 consumeStep.maxRetries = 5;
@@ -121,13 +122,12 @@ consumeStep.maxRetries = 5;
 export async function releaseStep(
   holdId: string,
   script: ChaosScript,
-  attempt = 1,
 ): Promise<void> {
   "use step";
   try {
     await inventoryProvider.release(holdId, script.release);
   } catch (error) {
-    classify(error, attempt);
+    classify(error);
   }
 }
 releaseStep.maxRetries = 2;

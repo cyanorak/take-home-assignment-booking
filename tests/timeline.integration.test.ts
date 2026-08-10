@@ -131,6 +131,26 @@ describe("timeline of a booking that retried", () => {
     expect(t.booking["state"]).toBe("confirmed");
   });
 
+  it("shows the backoff ESCALATING between attempts", async () => {
+    const id = await book("v5-backoff", "offer-v5-backoff", "charge=http_5xx,http_5xx,ok");
+    const t = await timeline(id);
+
+    const retries = t.events.filter((e) => e.type === "step.retrying");
+    expect(retries).toHaveLength(2);
+
+    // Each retry records when it will next run. The gap from the retry event
+    // to that time is the backoff actually applied.
+    const backoffs = retries.map(
+      (r) => new Date(r.detail!["retryAfter"] as string).getTime() - new Date(r.at).getTime(),
+    );
+
+    // A version of classify() took `attempt` as a step parameter the workflow
+    // could not supply, so it was always 1 and every backoff was identical.
+    // The escalation existed only in the comment. This is the assertion that
+    // would have caught it.
+    expect(backoffs[1]!).toBeGreaterThan(backoffs[0]!);
+  });
+
   it("does not leak stack traces into the audit trail", async () => {
     const id = await book("v5-nostack", "offer-v5-nostack", "charge=http_5xx,ok");
     const t = await timeline(id);
