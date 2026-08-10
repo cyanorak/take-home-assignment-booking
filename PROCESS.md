@@ -13,7 +13,7 @@ I reviewed a lot of the plan by hand and gave feedback. I ended up short on time
 The biggest thing was still requiring some local state. My simple approach is not production ready, needing shared state across appservers.
 
 ### What you'd do differently next time.
-I may have scripped the original ASSIGNMENT.md, which I copied all from the ask, and remove sections like the nice to haves, and make the language more clear around limiting what we implement. Time was my issue going too complicated to begin then needing multiple planning iterations to simplify.
+I may have edited the original ASSIGNMENT.md, which I copied all from the ask, and remove sections like the nice to haves, and make the language more clear around limiting what we implement. Time was my issue going too complicated to begin then needing multiple planning iterations to simplify.
 
 ## Known gaps
 - No automatic refund (deferred by decision, see prompt 7).
